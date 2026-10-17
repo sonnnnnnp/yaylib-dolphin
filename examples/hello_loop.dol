@@ -1,0 +1,102 @@
+// 実際のアカウントで試す例。「hello yaylib dolphin 1」「… 2」「… 3」と、for で順に投稿する。
+//
+//     YAY_EMAIL=... YAY_PASSWORD=... dolphin examples/hello_loop.dol [回数]
+//
+// 環境変数:
+//   YAY_EMAIL / YAY_PASSWORD  ログインに使う（必須）
+//   YAY_2FA_CODE              2 要素認証のコード（要るときだけ）
+//   YAY_CLEANUP=1             最後に、いま投稿したものを削除する
+//   YAY_BASE_URL              接続先を変える（偽のサーバーで試すとき）
+//
+// 回数の既定は 3、上限は 10。投稿のあいだは 3 秒あける（短い間隔で続けると、制限にかかることがある）。
+// ログイン状態は yay-session.json に保存して、次回から使い回す（毎回ログインしない）。
+// このファイルにはトークンが入るので、人に渡さないこと。
+
+@yay := import["../mod.dol"]
+@os := import["std:os"]
+@time := import["std:time"]
+
+@interval := 3
+@max_count := 10
+
+env[@name] (
+    @value := @os.env[@name]
+    if @value == nil || @value == "" (
+        log["環境変数 @{@name} を設定してください"]
+        @os.exit[2]
+    )
+    # @value
+)
+
+// エラー値を、人が読める形で出す
+report[@what, @e] (
+    log["失敗（@{@what}）:", err_kind[@e], err_message[@e]]
+    if err_kind[@e] == "api" (
+        log["  status:", @yay.status_of[@e], " error_code:", @yay.code_of[@e]]
+        @res := @yay.error_response_of[@e]
+        if @res != nil && @res{"retry_in"} != nil ( log["  retry_in:", @res{"retry_in"}, "秒"] )
+        if @res != nil && @res{"ban_until"} != nil ( log["  ban_until:", @res{"ban_until"}] )
+    )
+    # nil
+)
+
+main[@count] (
+    @env := @os.env_all[]
+    @client := @yay.new_client[{
+        "base_url": map_get[@env, "YAY_BASE_URL", "https://api.yay.space"],
+        "session_store": @yay.file_session_store["yay-session.json"]
+    }]
+
+    // ログイン（保存したセッションがあればそれを使う）
+    @params := {"email": env["YAY_EMAIL"], "password": env["YAY_PASSWORD"]}
+    if map_get[@env, "YAY_2FA_CODE", ""] != "" ( @params{"two_fa_code"} = @env{"YAY_2FA_CODE"} )
+    @login := @yay.login_with_email[@client, @params]
+    if is_error[@login] (
+        if @yay.code_of[@login] == @yay.error_codes[]{"required_2fa"} (
+            log["2 要素認証のコードが要ります。YAY_2FA_CODE に入れて、もう一度実行してください"]
+        )
+        report["ログイン", @login]
+        # @login
+    )
+    log["ログインしました（user_id: @{@client{"user_id"}}）"]
+
+    // 投稿する
+    @posted := {}
+    for @i in range[1, @count + 1] (
+        @text := "hello yaylib dolphin @{@i}"
+        @post := @yay.create_post[@client, {"post_type": "text", "text": @text}]
+        if is_error[@post] (
+            report["@{@i} 回目の投稿", @post]
+            # @post
+        )
+        arr_push[@posted, @post{"id"}]
+        log["投稿しました: @{@text}（id: @{@post{"id"}}）"]
+        if @i < @count ( @time.sleep[@interval] )
+    )
+
+    // 後片付け（YAY_CLEANUP=1 のとき）
+    if map_get[@env, "YAY_CLEANUP", ""] == "1" && arr_len[@posted] > 0 (
+        @deleted := @yay.delete_posts[@client, {"posts_ids": @posted}]
+        if is_error[@deleted] (
+            report["削除", @deleted]
+            # @deleted
+        )
+        log["削除しました: @{str_join[arr_map[@posted, to_str], ", "]}"]
+    )
+    # nil
+)
+
+// 回数
+@count := 3
+@args := @os.args[]
+if arr_len[@args] > 0 (
+    @n := to_num[@args{0}]
+    if is_error[@n] || @n < 1 || @n > @max_count || @n != floor[@n] (
+        log["回数は 1〜@{@max_count} の整数で指定してください"]
+        @os.exit[2]
+    )
+    @count = @n
+)
+
+@result := main[@count]
+if is_error[@result] ( @os.exit[1] )

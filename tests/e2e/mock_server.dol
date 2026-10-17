@@ -45,6 +45,7 @@
         }}}
     )
     if @path == "/v2/debug/puts" ( # {"json": {"puts": @puts}} )
+    if @path == "/v2/posts/mass_destroy" ( # {"json": {}} )
     if @path == "/v3/posts/new" (
         arr_push[@posts, {"id": arr_len[@posts] + 1, "len": str_len[@req{"body"}], "ct": str_sub[@h{"content-type"}, 0, 19], "jwt": map_has[@h, "x-jwt"]}]
         # {"json": {"id": arr_len[@posts]}}

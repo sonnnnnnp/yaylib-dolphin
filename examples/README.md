@@ -5,6 +5,7 @@
 - `timeline.dol` — 認証 + タイムライン取得
 - `post.dol` — テキスト投稿
 - `image_post.dol` — 画像つきの投稿（アップロード → 投稿）
+- `hello_loop.dol` — 実際のアカウントで試す（「hello yaylib dolphin 1」…を `for` で順に投稿。`YAY_CLEANUP=1` で最後に削除）
 - `event_stream.dol` — イベントストリームの簡単なボット
 - `session_and_errors.dol` — セッション永続化とエラー処理
 
