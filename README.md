@@ -127,6 +127,10 @@ dolphin test tests            # テスト（偽の通信で動く。ネットワ
 - 署名付き URL への PUT は、順番に送ります（最初の失敗で止まります）
 - セッションファイルの権限（`0600`）は設定できません
 
+## 既定の定数について
+
+`src/client.dol` の `api_key`・`web_api_key`・`api_version_key` などの既定値は、元の [ekkx/yaylib](https://github.com/ekkx/yaylib)（MIT）が公開している既定値と同じです。このライブラリが独自に取得したものではありません。変わったときは、`new_client` のオプションで上書きできます。
+
 ## ライセンス
 
 MIT。元の [ekkx/yaylib](https://github.com/ekkx/yaylib)（© ekkx）の移植を含みます。`LICENSE` を見てください。
