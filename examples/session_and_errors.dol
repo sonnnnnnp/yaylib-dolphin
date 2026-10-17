@@ -1,0 +1,65 @@
+// セッション永続化とエラー処理の例。
+//
+// ファイルのセッションストアを渡すと、ログイン状態がファイルに保存され、
+// 次回以降は保存したセッションが使われます（毎回ログインしません）。
+// 2xx 以外は、種類 "api" のエラー値になります。`status_of` `code_of` `error_response_of`
+// で中身を調べられます。
+//
+//     YAY_EMAIL=... YAY_PASSWORD=... dolphin examples/session_and_errors.dol
+
+@yay := import["../mod.dol"]
+@os := import["std:os"]
+
+env[@name] (
+    @value := @os.env[@name]
+    if @value == nil || @value == "" (
+        log["環境変数 @{@name} を設定してください"]
+        @os.exit[2]
+    )
+    # @value
+)
+
+main[] (
+    @store := @yay.file_session_store["yay-session.json"]
+
+    // 2 回目以降の実行では、保存済みのセッションが使われる
+    @client := @yay.new_client[{
+        "base_url": map_get[@os.env_all[], "YAY_BASE_URL", "https://api.yay.space"],
+        "session_store": @store
+    }]
+    @login := @yay.login_with_email[@client, {"email": env["YAY_EMAIL"], "password": env["YAY_PASSWORD"]}]
+    if is_error[@login] (
+        // 2 要素認証が要るとき: error_codes[]{"required_2fa"}。コードを入れてもう一度呼ぶ
+        if @yay.code_of[@login] == @yay.error_codes[]{"required_2fa"} (
+            log["2 要素認証のコードが必要です（two_fa_code を渡してください）"]
+        )
+        # @login
+    )
+
+    @timeline := @yay.get_timeline[@client, {"noreply_mode": "", "number": 20}]
+    if is_error[@timeline] (
+        if err_kind[@timeline] == "api" (
+            log["error code:", @yay.code_of[@timeline]]
+            @res := @yay.error_response_of[@timeline]
+            if @res != nil (
+                log["message:", @res{"message"}]
+                // 一時的な制限や BAN のときは retry_in / ban_until が付く
+                if @res{"retry_in"} != nil ( log["retry in:", @res{"retry_in"}, "秒"] )
+                if @res{"ban_until"} != nil ( log["ban until:", @res{"ban_until"}] )
+            )
+            log["status:", @yay.status_of[@timeline]]
+        ) else (
+            // 通信の失敗（"network" "timeout"）は、std:http のエラー値のまま
+            log["通信の失敗:", err_kind[@timeline], err_message[@timeline]]
+        )
+        # nil
+    )
+    log["posts:", arr_len[map_get[@timeline, "posts", {}]]]
+    # nil
+)
+
+@result := main[]
+if is_error[@result] (
+    log["失敗:", err_kind[@result], err_message[@result]]
+    @os.exit[1]
+)

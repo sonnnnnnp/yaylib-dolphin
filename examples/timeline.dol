@@ -1,0 +1,34 @@
+// 認証してタイムラインを取得する最小例。
+//
+//     YAY_EMAIL=... YAY_PASSWORD=... dolphin examples/timeline.dol
+
+@yay := import["../mod.dol"]
+@os := import["std:os"]
+
+// 環境変数を読む（なければ、使い方を出して終わる）
+env[@name] (
+    @value := @os.env[@name]
+    if @value == nil || @value == "" (
+        log["環境変数 @{@name} を設定してください"]
+        @os.exit[2]
+    )
+    # @value
+)
+
+main[] (
+    @client := @yay.new_client[{"base_url": map_get[@os.env_all[], "YAY_BASE_URL", "https://api.yay.space"]}]
+    @yay.login_with_email[@client, {"email": env["YAY_EMAIL"], "password": env["YAY_PASSWORD"]}]?
+
+    // `noreply_mode` は "" か "noreply_"（返信なしの投稿だけ）
+    @timeline := @yay.get_timeline[@client, {"noreply_mode": "", "number": 20}]?
+    for @post in map_get[@timeline, "posts", {}] (
+        log[@post{"id"}, map_get[@post, "text", ""]]
+    )
+    # nil
+)
+
+@result := main[]
+if is_error[@result] (
+    log["失敗:", err_kind[@result], err_message[@result]]
+    @os.exit[1]
+)

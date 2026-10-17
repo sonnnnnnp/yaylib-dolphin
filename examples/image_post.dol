@@ -1,0 +1,50 @@
+// 画像つきの投稿の例（アップロード → 投稿）。
+// 画像は、縦横を調べ、サムネイルを作ってから、署名付き URL に送られます。
+// 投稿に渡すのは、アップロードが返したサーバー上の名前です（ローカルのパスではありません）。
+//
+//     YAY_EMAIL=... YAY_PASSWORD=... dolphin examples/image_post.dol photo.png "写真を載せます"
+
+@yay := import["../mod.dol"]
+@os := import["std:os"]
+@path := import["std:path"]
+
+env[@name] (
+    @value := @os.env[@name]
+    if @value == nil || @value == "" (
+        log["環境変数 @{@name} を設定してください"]
+        @os.exit[2]
+    )
+    # @value
+)
+
+main[@file, @text] (
+    @client := @yay.new_client[{"base_url": map_get[@os.env_all[], "YAY_BASE_URL", "https://api.yay.space"]}]
+    @yay.login_with_email[@client, {"email": env["YAY_EMAIL"], "password": env["YAY_PASSWORD"]}]?
+
+    @data := file_read_bytes[@file]?
+    // 1 枚（9 枚まで同時に送れる）。名前から拡張子（png / jpeg / gif）が決まる
+    @names := @yay.upload_post_images[@client, {{"filename": @path.basename[@file], "data": @data}}]?
+
+    @post := @yay.create_post[@client, {
+        "post_type": "image",
+        "text": @text,
+        "attachment_filename": @names{0}
+    }]?
+    log["posted:", @post{"id"}]
+    log["画像:", @yay.media_url[@names{0}]]
+    # nil
+)
+
+@args := @os.args[]
+if arr_len[@args] < 1 (
+    log["使い方: dolphin examples/image_post.dol <画像> [本文]"]
+    @os.exit[2]
+)
+@body := "hello from yaylib"
+if arr_len[@args] > 1 ( @body = @args{1} )
+
+@result := main[@args{0}, @body]
+if is_error[@result] (
+    log["失敗:", err_kind[@result], err_message[@result]]
+    @os.exit[1]
+)

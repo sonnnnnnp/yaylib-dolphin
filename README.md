@@ -79,6 +79,14 @@ if @yay.code_of[@r] == @yay.error_codes[]{"required_2fa"} ( log["2 要素認証�
 
 イベントは `{"type": "NewMessageEvent", "name": "new_message", "data": …}`。知らないイベントは `"type": "RawEvent"` で届きます。
 
+## サンプル
+
+[`examples/`](examples/) に、本家の `examples/` と同じ題材（タイムライン・投稿・イベントストリーム・セッションとエラー処理）と、画像つきの投稿があります。
+
+```
+YAY_EMAIL=... YAY_PASSWORD=... dolphin examples/timeline.dol
+```
+
 ## 設定
 
 `new_client` のオプションで変えられます（Go 版の `WithXxx` と同じ名前を snake_case に）: `base_url`・`cassandra_base_url`・`event_stream_url`・`api_key`・`web_api_key`・`api_version_key`・`api_version_name`・`app_version`・`device_*`・`user_agent`・`device_info`・`connection_type`・`accept_language`・`http_timeout`・`retry`（`max_attempts` `base_delay` `max_delay` `retry_on_post`）・`session_store`・`logger`・`device_uuid`・`client_ip`。

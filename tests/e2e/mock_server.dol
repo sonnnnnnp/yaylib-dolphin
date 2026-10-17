@@ -4,6 +4,7 @@
 
 @port := to_num[@os.args[]{0}]
 @posts := {}
+@puts := {}
 
 @http.serve[@port, [@req] (
     @path := @req{"path"}
@@ -20,6 +21,11 @@
         )
         # {"json": {"access_token": "A2", "refresh_token": "R2", "id": 7}}
     )
+    // 署名付き URL への PUT（認証なし）。受け取った大きさを覚えて 200 を返す
+    if str_starts_with[@path, "/put/"] (
+        arr_push[@puts, {"path": @path, "ct": map_get[@h, "content-type", ""], "len": bytes_len[@req{"raw"}], "auth": map_has[@h, "authorization"]}]
+        # {"body": ""}
+    )
     // 以降は認証が要る。A1 は期限切れ扱いにして、更新を試す
     @auth := map_get[@h, "authorization", ""]
     if @auth == "Bearer A1" ( # {"status": 401, "json": {"error_code": -3, "message": "expired"}} )
@@ -27,6 +33,18 @@
     if @path == "/v2/posts/timeline" (
         # {"json": {"posts": @posts, "ip": map_get[@h, "x-client-ip", ""], "ua": map_get[@h, "user-agent", ""]}}
     )
+    // 画像 1 枚の署名付き URL（本体とサムネイルの 2 つ）。クエリは同じ名前の最後だけ見えるので、
+    // 最後がサムネイル（thumb_…）のときの 1 枚だけに対応する
+    if @path == "/v1/buckets/presigned_urls" (
+        @last := map_get[@req{"query"}, "file_names[]", ""]
+        @main := str_replace[@last, "/thumb_", "/"]
+        @base := "http://127.0.0.1:@{@port}/put"
+        # {"json": {"presigned_urls": {
+            {"filename": "s3/@{@main}", "url": "@{@base}/main"},
+            {"filename": "s3/@{@last}", "url": "@{@base}/thumb"}
+        }}}
+    )
+    if @path == "/v2/debug/puts" ( # {"json": {"puts": @puts}} )
     if @path == "/v3/posts/new" (
         arr_push[@posts, {"id": arr_len[@posts] + 1, "len": str_len[@req{"body"}], "ct": str_sub[@h{"content-type"}, 0, 19], "jwt": map_has[@h, "x-jwt"]}]
         # {"json": {"id": arr_len[@posts]}}

@@ -1,0 +1,50 @@
+// イベントストリームで新着チャットメッセージを受信する簡単なボット。
+// Ctrl-C で終了します。
+//
+//     YAY_EMAIL=... YAY_PASSWORD=... dolphin examples/event_stream.dol
+
+@yay := import["../mod.dol"]
+@os := import["std:os"]
+
+env[@name] (
+    @value := @os.env[@name]
+    if @value == nil || @value == "" (
+        log["環境変数 @{@name} を設定してください"]
+        @os.exit[2]
+    )
+    # @value
+)
+
+main[] (
+    @client := @yay.new_client[{"base_url": map_get[@os.env_all[], "YAY_BASE_URL", "https://api.yay.space"]}]
+    @yay.login_with_email[@client, {"email": env["YAY_EMAIL"], "password": env["YAY_PASSWORD"]}]?
+
+    // 切れたら自動でつなぎ直す。あきらめたとき（回数の上限など）だけ on_error が呼ばれる
+    @stream := @yay.open_event_stream[@client, {
+        "on_open": [] ( log["接続しました"] ),
+        "on_reconnect": [@attempt, @delay] ( log["つなぎ直します: @{@attempt} 回目、@{@delay} 秒後"] ),
+        "on_error": [@e] ( log["あきらめました:", err_message[@e]] )
+    }]
+
+    @yay.subscribe[@stream, @yay.chat_room_channel[], {
+        "on_confirm": [] ( log["listening for events (Ctrl-C to stop)"] ),
+        "on_event": [@event] (
+            if @event{"type"} == "NewMessageEvent" (
+                log["new message:", @event{"data"}]
+            ) else (
+                log["event:", @event{"type"}]
+            )
+        ),
+        "on_closed": [@e] ( log["購読が終わりました"] )
+    }]
+
+    // イベントループ。購読が終わるまで（Ctrl-C まで）ここで待つ
+    @yay.run[]
+    # nil
+)
+
+@result := main[]
+if is_error[@result] (
+    log["失敗:", err_kind[@result], err_message[@result]]
+    @os.exit[1]
+)

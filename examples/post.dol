@@ -1,0 +1,36 @@
+// テキスト投稿の例。投稿系のエンドポイントは X-Jwt が要ります。
+// `x_jwt[@client]` で作って、そのまま渡します（5 秒で失効するので、呼ぶたびに作ります。
+// 渡さなければ、yaylib が自動で作ります）。
+//
+//     YAY_EMAIL=... YAY_PASSWORD=... dolphin examples/post.dol
+
+@yay := import["../mod.dol"]
+@os := import["std:os"]
+
+env[@name] (
+    @value := @os.env[@name]
+    if @value == nil || @value == "" (
+        log["環境変数 @{@name} を設定してください"]
+        @os.exit[2]
+    )
+    # @value
+)
+
+main[] (
+    @client := @yay.new_client[{"base_url": map_get[@os.env_all[], "YAY_BASE_URL", "https://api.yay.space"]}]
+    @yay.login_with_email[@client, {"email": env["YAY_EMAIL"], "password": env["YAY_PASSWORD"]}]?
+
+    @post := @yay.create_post[@client, {
+        "x_jwt": @yay.x_jwt[@client],
+        "post_type": "text",
+        "text": "hello from yaylib"
+    }]?
+    log["posted:", @post{"id"}]
+    # nil
+)
+
+@result := main[]
+if is_error[@result] (
+    log["失敗:", err_kind[@result], err_message[@result]]
+    @os.exit[1]
+)
