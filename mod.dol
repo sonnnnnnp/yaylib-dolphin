@@ -1,0 +1,1285 @@
+// yaylib — Yay! の非公式 API クライアント（Dolphin 版）
+//
+// ekkx/yaylib（MIT）の Dolphin への移植。オペレーションの表は tools/gen.py が元の gen/ から作る。
+//   @yay := import["yaylib"]
+//   @c := @yay.new_client[]
+//   @yay.login_with_email[@c, {"email": "…", "password": "…"}]?
+//   @tl := @yay.get_timeline[@c, {"noreply_mode": "", "number": 20}]?
+//
+// このファイルの前半は手書き、後半（オペレーションの関数）は tools/gen.py が作る。
+// `mod.dol` を直接は編集せず、`src/mod_head.dol` を編集して `python tools/gen.py` を実行する。
+
+@rt := import["./src/call.dol"]
+@client_ := import["./src/client.dol"]
+@auth_ := import["./src/auth.dol"]
+@session_ := import["./src/session.dol"]
+@signing_ := import["./src/signing.dol"]
+@errors_ := import["./src/errors.dol"]
+@upload_ := import["./src/upload.dol"]
+@stream_ := import["./src/event_stream.dol"]
+@async_ := import["std:async"]
+
+// このライブラリの版
+version[] (
+    # "0.1.0"
+)
+
+// ---- クライアント ----
+
+// クライアントを作る。何も渡さなくても動く。設定のキーは src/client.dol を参照
+new_client[@options = {:}] (
+    # @client_.new_client[@options]
+)
+
+// 既定の設定のマップ
+defaults[] (
+    # @client_.defaults[]
+)
+
+set_tokens[@c, @access, @refresh] (
+    # @client_.set_tokens[@c, @access, @refresh]
+)
+
+// 今のトークン {"access", "refresh"} の写し
+tokens[@c] (
+    # @client_.tokens[@c]
+)
+
+// ログインせずにトークンから始めるとき、ユーザー ID も設定する
+set_user_id[@c, @user_id] (
+    # @client_.set_user_id[@c, @user_id]
+)
+
+// ---- 認証・セッション ----
+
+// メールアドレスとパスワードでログインする（キャッシュ → ブラウザ版 → アプリ版）。
+// params: email, password, two_fa_code, api_key, uuid, no_cache
+login_with_email[@c, @params] (
+    # @auth_.login_with_email[@c, @params]
+)
+
+// セッションストアから復元する。なければ nil
+load_session[@c, @email] (
+    # @auth_.load_session[@c, @email]
+)
+
+// 今のセッションを保存する
+save_session[@c] (
+    # @auth_.save_session[@c]
+)
+
+// JSON ファイルに保存するセッションストア（`new_client` の `session_store` に渡す）
+file_session_store[@file] (
+    # @session_.file_session_store[@file]
+)
+
+// メモリ上のセッションストア（テスト用）
+memory_session_store[] (
+    # @session_.memory_session_store[]
+)
+
+// ---- 署名 ----
+
+signed_info[@c] (
+    # @signing_.signed_info[@c]
+)
+
+signed_info_at[@c, @timestamp] (
+    # @signing_.signed_info_at[@c, @timestamp]
+)
+
+signed_version[@c] (
+    # @signing_.signed_version[@c]
+)
+
+// X-Jwt（有効期間 5 秒。呼ぶたびに作る）
+x_jwt[@c] (
+    # @signing_.x_jwt[@c]
+)
+
+x_jwt_at[@c, @iat] (
+    # @signing_.x_jwt_at[@c, @iat]
+)
+
+new_uuid[] (
+    # @signing_.new_uuid[]
+)
+
+// ---- エラー ----
+
+// サーバーのエラー {"error_code", "message", "ban_until", "retry_in", "remaining_quota"}。なければ nil
+error_response_of[@e] (
+    # @errors_.error_response_of[@e]
+)
+
+// サーバーのエラーコード（解析できなければ 0）
+code_of[@e] (
+    # @errors_.code_of[@e]
+)
+
+// HTTP のステータス（"api" のエラーでなければ 0）
+status_of[@e] (
+    # @errors_.status_of[@e]
+)
+
+// エラーコードの表（`error_codes[]{"required_2fa"}` は -31）
+error_codes[] (
+    # @errors_.error_codes[]
+)
+
+// ---- 呼び出し ----
+
+// 名前でオペレーションを呼ぶ（`get_timeline[@c, {…}]` と同じ）
+call[@c, @operation, @params = {:}] (
+    # @rt.call[@c, @operation, @params]
+)
+
+// 本文を読まずに、応答 {"status", "headers", "body"} をそのまま返す
+execute_raw[@c, @operation, @params = {:}] (
+    # @rt.execute_raw[@c, @operation, @params]
+)
+
+// オペレーションの表（名前 → メソッド・パス・パラメーター）
+operations[] (
+    # @rt.operations[]
+)
+
+// ---- アップロード ----
+// ファイルは {"filename": "a.png", "data": バイト列}。戻り値は投稿などに渡すサーバー上の名前
+
+upload_avatar_image[@c, @file] (
+    # @upload_.upload_avatar_image[@c, @file]
+)
+
+upload_cover_image[@c, @file] (
+    # @upload_.upload_cover_image[@c, @file]
+)
+
+// 投稿の画像（9 枚まで）
+upload_post_images[@c, @files] (
+    # @upload_.upload_post_images[@c, @files]
+)
+
+upload_chat_message_images[@c, @room_id, @files] (
+    # @upload_.upload_chat_message_images[@c, @room_id, @files]
+)
+
+upload_chat_background_image[@c, @room_id, @file] (
+    # @upload_.upload_chat_background_image[@c, @room_id, @file]
+)
+
+upload_group_icon_image[@c, @group_id, @file] (
+    # @upload_.upload_group_icon_image[@c, @group_id, @file]
+)
+
+upload_group_cover_image[@c, @group_id, @file] (
+    # @upload_.upload_group_cover_image[@c, @group_id, @file]
+)
+
+upload_thread_icon_image[@c, @group_id, @file] (
+    # @upload_.upload_thread_icon_image[@c, @group_id, @file]
+)
+
+upload_signup_avatar_image[@c, @file] (
+    # @upload_.upload_signup_avatar_image[@c, @file]
+)
+
+upload_group_creation_icon_image[@c, @file] (
+    # @upload_.upload_group_creation_icon_image[@c, @file]
+)
+
+upload_group_creation_cover_image[@c, @file] (
+    # @upload_.upload_group_creation_cover_image[@c, @file]
+)
+
+// 通報の画像（4 枚まで）
+upload_report_images[@c, @files] (
+    # @upload_.upload_report_images[@c, @files]
+)
+
+upload_video_call_snapshot_image[@c, @file] (
+    # @upload_.upload_video_call_snapshot_image[@c, @file]
+)
+
+// 動画（mp4 のバイト列）。戻り値は投稿に渡す動画のファイル名
+upload_video[@c, @data] (
+    # @upload_.upload_video[@c, @data]
+)
+
+// アップロードしたファイルの公開 URL
+media_url[@filename] (
+    # @upload_.media_url[@filename]
+)
+
+// ---- イベントストリーム ----
+// コールバックで動く。`run[]`（または std:async の run）でイベントループを動かす
+
+// ストリームを開く。options: reconnect, on_open, on_error, on_reconnect
+open_event_stream[@c, @options = {:}] (
+    # @stream_.open_event_stream[@c, @options]
+)
+
+// 購読する。handlers: on_event, on_confirm, on_reject, on_closed
+subscribe[@stream, @channel, @handlers = {:}] (
+    # @stream_.subscribe[@stream, @channel, @handlers]
+)
+
+unsubscribe[@stream, @subscription] (
+    # @stream_.unsubscribe[@stream, @subscription]
+)
+
+close_event_stream[@stream] (
+    # @stream_.close_event_stream[@stream]
+)
+
+chat_room_channel[] (
+    # @stream_.chat_room_channel[]
+)
+
+messages_channel[@chat_room_id] (
+    # @stream_.messages_channel[@chat_room_id]
+)
+
+group_updates_channel[] (
+    # @stream_.group_updates_channel[]
+)
+
+group_posts_channel[@group_id] (
+    # @stream_.group_posts_channel[@group_id]
+)
+
+// 待っているもの（イベントストリーム・タイマー）がなくなるまで、イベントループを動かす
+run[] (
+    # @async_.run[]
+)
+
+// ---- 以下は tools/gen.py が作る（オペレーション） ----
+
+// POST /v1/chat_rooms/accept_chat_request
+// form: chat_room_ids
+accept_chat_request[@c, @params = {:}] ( # @rt.call[@c, "accept_chat_request", @params] )
+
+// POST /v1/groups/{id}/accept/{userId}
+// path: id, userId
+accept_group_join_request[@c, @params = {:}] ( # @rt.call[@c, "accept_group_join_request", @params] )
+
+// PUT /v1/groups/{id}/transfer
+// path: id
+accept_group_transfer[@c, @params = {:}] ( # @rt.call[@c, "accept_group_transfer", @params] )
+
+// POST /v1/threads/{thread_id}/members/{id}
+// path: thread_id, id
+add_thread_member[@c, @params = {:}] ( # @rt.call[@c, "add_thread_member", @params] )
+
+// POST /v1/users/policy_agreements/{type}
+// path: type
+agree_policy[@c, @params = {:}] ( # @rt.call[@c, "agree_policy", @params] )
+
+// POST /v1/groups/{id}/ban/{userId}
+// path: id, userId
+ban_group_user[@c, @params = {:}] ( # @rt.call[@c, "ban_group_user", @params] )
+
+// POST /v1/users/{id}/block
+// path: id
+block_user[@c, @params = {:}] ( # @rt.call[@c, "block_user", @params] )
+
+// POST /v1/calls/{call_id}/bulk_invite
+// path: call_id
+// query: group_id
+bulk_invite_to_call[@c, @params = {:}] ( # @rt.call[@c, "bulk_invite_to_call", @params] )
+
+// POST /v1/calls/{call_id}/bump
+// path: call_id
+// query: participant_limit
+bump_call[@c, @params = {:}] ( # @rt.call[@c, "bump_call", @params] )
+
+// DELETE /v1/groups/{id}/transfer
+// path: id
+cancel_group_transfer[@c, @params = {:}] ( # @rt.call[@c, "cancel_group_transfer", @params] )
+
+// PUT /v1/users/change_email
+// form: api_key, email, email_grant_token, password
+change_email[@c, @params = {:}] ( # @rt.call[@c, "change_email", @params] )
+
+// PUT /v1/users/change_password
+// form: api_key, current_password, password
+change_password[@c, @params = {:}] ( # @rt.call[@c, "change_password", @params] )
+
+// PUT /v1/users/{user_id}/bookmarks/{id}
+// path: user_id, id
+create_bookmark[@c, @params = {:}] ( # @rt.call[@c, "create_bookmark", @params] )
+
+// POST /v3/chat_rooms/new
+// form: background_filename, icon_filename, name, with_user_ids
+create_chat_room[@c, @params = {:}] ( # @rt.call[@c, "create_chat_room", @params] )
+
+// POST /v1/chat_rooms/new
+// form: hima_chat, matching_id, with_user_id
+create_chat_room_v1[@c, @params = {:}] ( # @rt.call[@c, "create_chat_room_v1", @params] )
+
+// POST /v2/posts/new_conference_call
+// form: api_key, attachment_2_filename, attachment_3_filename, attachment_4_filename, attachment_5_filename, attachment_6_filename, attachment_7_filename, attachment_8_filename, attachment_9_filename, attachment_filename, call_type, category_id, color, font_size, game_title, group_id, joinable_by, language, message_tags, signed_info, text, timestamp, uuid
+create_conference_call_post[@c, @params = {:}] ( # @rt.call[@c, "create_conference_call_post", @params] )
+
+// POST /v3/groups/new
+// form: allow_members_to_post_image_and_video, allow_members_to_post_url, allow_ownership_transfer, allow_thread_creation_by, api_key, call_timeline_display, cover_image_filename, description, gender, generation_groups_limit, group_category_id, group_icon_filename, guidelines, hide_conference_call, hide_from_game_eight, hide_reported_posts, is_private, only_mobile_verified, only_verified_age, secret, signed_info, sub_category_id, timestamp, topic, uuid
+create_group[@c, @params = {:}] ( # @rt.call[@c, "create_group", @params] )
+
+// POST /v1/hidden/words
+// body: body（JSON）
+create_mute_keyword[@c, @params = {:}] ( # @rt.call[@c, "create_mute_keyword", @params] )
+
+// POST /v3/posts/new
+// form: attachment_2_filename, attachment_3_filename, attachment_4_filename, attachment_5_filename, attachment_6_filename, attachment_7_filename, attachment_8_filename, attachment_9_filename, attachment_filename, choices, color, font_size, group_id, in_reply_to, language, mention_ids, message_tags, post_type, shared_url, text, video_file_name
+// header: x_jwt
+create_post[@c, @params = {:}] ( # @rt.call[@c, "create_post", @params] )
+
+// POST /v1/users/reviews
+// form: api_key, comment, signed_info, timestamp, user_ids, uuid
+create_review[@c, @params = {:}] ( # @rt.call[@c, "create_review", @params] )
+
+// POST /v2/posts/new_share_post
+// form: api_key, color, font_size, group_id, language, message_tags, shareable_id, shareable_type, signed_info, text, timestamp, uuid
+create_share_post[@c, @params = {:}] ( # @rt.call[@c, "create_share_post", @params] )
+
+// POST /v1/threads
+// body: body（JSON）
+create_thread[@c, @params = {:}] ( # @rt.call[@c, "create_thread", @params] )
+
+// POST /v1/threads/{id}/posts
+// path: id
+// form: attachment_2_filename, attachment_3_filename, attachment_4_filename, attachment_5_filename, attachment_6_filename, attachment_7_filename, attachment_8_filename, attachment_9_filename, attachment_filename, choices, color, font_size, group_id, in_reply_to, language, mention_ids, message_tags, post_type, shared_url, text, video_file_name
+// header: x_jwt
+create_thread_post[@c, @params = {:}] ( # @rt.call[@c, "create_thread_post", @params] )
+
+// POST /v1/groups/{id}/decline/{userId}
+// path: id, userId
+decline_group_join_request[@c, @params = {:}] ( # @rt.call[@c, "decline_group_join_request", @params] )
+
+// POST /v1/posts/delete_all_post
+delete_all_posts[@c, @params = {:}] ( # @rt.call[@c, "delete_all_posts", @params] )
+
+// DELETE /v1/users/{user_id}/bookmarks/{id}
+// path: user_id, id
+delete_bookmark[@c, @params = {:}] ( # @rt.call[@c, "delete_bookmark", @params] )
+
+// DELETE /v1/chat_rooms/{room_id}/messages/{message_id}/delete
+// path: room_id, message_id
+delete_chat_message[@c, @params = {:}] ( # @rt.call[@c, "delete_chat_message", @params] )
+
+// POST /v1/chat_rooms/mass_destroy
+// form: chat_room_ids
+delete_chat_rooms[@c, @params = {:}] ( # @rt.call[@c, "delete_chat_rooms", @params] )
+
+// DELETE /v2/users/{user_id}/footprints/{footprint_id}
+// path: user_id, footprint_id
+delete_footprint[@c, @params = {:}] ( # @rt.call[@c, "delete_footprint", @params] )
+
+// DELETE /v1/hidden/words
+// query: ids
+delete_mute_keyword[@c, @params = {:}] ( # @rt.call[@c, "delete_mute_keyword", @params] )
+
+// DELETE /v1/users/reviews
+// query: review_ids
+delete_my_reviews[@c, @params = {:}] ( # @rt.call[@c, "delete_my_reviews", @params] )
+
+// POST /v2/posts/mass_destroy
+// form: posts_ids
+delete_posts[@c, @params = {:}] ( # @rt.call[@c, "delete_posts", @params] )
+
+// DELETE /v1/threads/{id}
+// path: id
+delete_thread[@c, @params = {:}] ( # @rt.call[@c, "delete_thread", @params] )
+
+// PUT /v1/groups/{id}/deputize
+// path: id
+deputize_group_users[@c, @params = {:}] ( # @rt.call[@c, "deputize_group_users", @params] )
+
+// POST /v3/groups/{group_id}/deputize/mass
+// path: group_id
+// form: api_key, signed_info, timestamp, user_ids, uuid
+deputize_group_users_mass[@c, @params = {:}] ( # @rt.call[@c, "deputize_group_users_mass", @params] )
+
+// PUT /v1/users/secret/disable
+// form: code
+disable_two_factor_auth[@c, @params = {:}] ( # @rt.call[@c, "disable_two_factor_auth", @params] )
+
+// POST /v3/users/edit
+// form: api_key, biography, country_code, cover_image_filename, gender, nickname, prefecture, profile_icon_filename, signed_info, timestamp, username, uuid
+edit_user[@c, @params = {:}] ( # @rt.call[@c, "edit_user", @params] )
+
+// POST /v2/users/edit
+// form: api_key, is_private, nickname, signed_info, timestamp, uuid
+edit_user_v2[@c, @params = {:}] ( # @rt.call[@c, "edit_user_v2", @params] )
+
+// PUT /v1/users/secret/enable
+// form: code, type
+enable_two_factor_auth[@c, @params = {:}] ( # @rt.call[@c, "enable_two_factor_auth", @params] )
+
+// POST /v1/groups/{group_id}/fire/{user_id}
+// path: group_id, user_id
+fire_group_user[@c, @params = {:}] ( # @rt.call[@c, "fire_group_user", @params] )
+
+// POST /v2/users/{id}/follow
+// path: id
+follow_user[@c, @params = {:}] ( # @rt.call[@c, "follow_user", @params] )
+
+// POST /v2/users/follow
+// query: user_ids
+follow_users[@c, @params = {:}] ( # @rt.call[@c, "follow_users", @params] )
+
+// POST /v1/calls/action_signature/generate
+// form: action, conference_id, target_user_uuid
+generate_call_action_signature[@c, @params = {:}] ( # @rt.call[@c, "generate_call_action_signature", @params] )
+
+// GET /v1/posts/active_call
+// query: user_id
+get_active_call_post[@c, @params = {:}] ( # @rt.call[@c, "get_active_call_post", @params] )
+
+// GET /v1/users/active_followings
+// query: only_online, from_loggedin_at
+get_active_followings[@c, @params = {:}] ( # @rt.call[@c, "get_active_followings", @params] )
+
+// GET /v1/users/additonal_notification_setting
+get_additional_notification_setting[@c, @params = {:}] ( # @rt.call[@c, "get_additional_notification_setting", @params] )
+
+// GET /v3/calls/{call_id}/agora_rtm_token
+// path: call_id
+get_agora_rtm_token[@c, @params = {:}] ( # @rt.call[@c, "get_agora_rtm_token", @params] )
+
+// GET /api/apps/{app}
+// path: app
+get_app_config[@c, @params = {:}] ( # @rt.call[@c, "get_app_config", @params] )
+
+// GET /{countryApiValue}/api/v2/banned_words
+// path: countryApiValue
+get_banned_words[@c, @params = {:}] ( # @rt.call[@c, "get_banned_words", @params] )
+
+// GET /v1/users/block_ids
+get_blocked_user_ids[@c, @params = {:}] ( # @rt.call[@c, "get_blocked_user_ids", @params] )
+
+// POST /v2/users/blocked
+// query: from_id
+// body: body（JSON）
+get_blocked_users[@c, @params = {:}] ( # @rt.call[@c, "get_blocked_users", @params] )
+
+// GET /v1/users/{user_id}/bookmarks
+// path: user_id
+// query: from
+get_bookmarked_posts[@c, @params = {:}] ( # @rt.call[@c, "get_bookmarked_posts", @params] )
+
+// GET /v1/buckets/presigned_urls
+// query: file_names
+get_bucket_presigned_urls[@c, @params = {:}] ( # @rt.call[@c, "get_bucket_presigned_urls", @params] )
+
+// GET /v1/calls/bgm
+get_call_bgms[@c, @params = {:}] ( # @rt.call[@c, "get_call_bgms", @params] )
+
+// GET /v2/posts/call_followers_timeline
+// query: from_timestamp, number, category_id, call_type, include_circle_call, exclude_recent_gomimushi
+get_call_followers_timeline[@c, @params = {:}] ( # @rt.call[@c, "get_call_followers_timeline", @params] )
+
+// GET /v1/calls/{call_id}/gift_transactions
+// path: call_id
+// query: from, number
+get_call_gift_history[@c, @params = {:}] ( # @rt.call[@c, "get_call_gift_history", @params] )
+
+// GET /v1/calls/{callId}/participants/{callUserId}
+// path: callId, callUserId
+get_call_participant[@c, @params = {:}] ( # @rt.call[@c, "get_call_participant", @params] )
+
+// GET /v2/posts/call_timeline
+// query: group_id, from_timestamp, number, category_id, call_type, include_circle_call, cross_generation, exclude_recent_gomimushi
+get_call_timeline[@c, @params = {:}] ( # @rt.call[@c, "get_call_timeline", @params] )
+
+// GET /v2/chat_rooms/{id}/messages
+// path: id
+// query: number, from_message_id, to_message_id
+get_chat_messages[@c, @params = {:}] ( # @rt.call[@c, "get_chat_messages", @params] )
+
+// GET /v1/chat_rooms/total_chat_request
+get_chat_request_count[@c, @params = {:}] ( # @rt.call[@c, "get_chat_request_count", @params] )
+
+// GET /v1/chat_rooms/request_list
+// query: from_timestamp
+get_chat_requests[@c, @params = {:}] ( # @rt.call[@c, "get_chat_requests", @params] )
+
+// GET /v2/chat_rooms/{id}
+// path: id
+get_chat_room[@c, @params = {:}] ( # @rt.call[@c, "get_chat_room", @params] )
+
+// GET /v1/chat_rooms/unread_status
+// query: from_time
+get_chat_unread_status[@c, @params = {:}] ( # @rt.call[@c, "get_chat_unread_status", @params] )
+
+// POST /v1/users/followings/chatable
+// query: from_follow_id, from_timestamp, order_by
+// body: body（JSON）
+get_chatable_followings[@c, @params = {:}] ( # @rt.call[@c, "get_chatable_followings", @params] )
+
+// GET /v1/community_campaign/group_leaderboard
+get_community_campaign_group_leaderboard[@c, @params = {:}] ( # @rt.call[@c, "get_community_campaign_group_leaderboard", @params] )
+
+// GET /v1/community_campaign
+get_community_campaign_status[@c, @params = {:}] ( # @rt.call[@c, "get_community_campaign_status", @params] )
+
+// GET /v1/community_campaign/groups/{id}/user_leaderboard
+// path: id
+get_community_campaign_user_leaderboard[@c, @params = {:}] ( # @rt.call[@c, "get_community_campaign_user_leaderboard", @params] )
+
+// GET /v2/calls/conferences/{call_id}
+// path: call_id
+get_conference_call[@c, @params = {:}] ( # @rt.call[@c, "get_conference_call", @params] )
+
+// GET /v2/conversations/{id}
+// path: id
+// query: group_id, thread_id, number, from_post_id, reverse
+get_conversation[@c, @params = {:}] ( # @rt.call[@c, "get_conversation", @params] )
+
+// GET /v1/users/default_settings
+get_default_settings[@c, @params = {:}] ( # @rt.call[@c, "get_default_settings", @params] )
+
+// GET /v2/users/follow_requests_count
+get_follow_request_count[@c, @params = {:}] ( # @rt.call[@c, "get_follow_request_count", @params] )
+
+// GET /v2/users/follow_requests
+// query: from_timestamp
+get_follow_requests[@c, @params = {:}] ( # @rt.call[@c, "get_follow_requests", @params] )
+
+// GET /v2/posts/following_timeline
+// query: from, from_post_id, only_root, order_by, number, mxn, reduce_selfie, custom_generation_range
+get_following_timeline[@c, @params = {:}] ( # @rt.call[@c, "get_following_timeline", @params] )
+
+// GET /v1/users/following_born_today
+// query: birthdate
+get_followings_born_today[@c, @params = {:}] ( # @rt.call[@c, "get_followings_born_today", @params] )
+
+// GET /v3/users/footprints
+// query: mode, number, from
+get_footprints[@c, @params = {:}] ( # @rt.call[@c, "get_footprints", @params] )
+
+// GET /v2/users/fresh/{id}
+// path: id
+get_fresh_user[@c, @params = {:}] ( # @rt.call[@c, "get_fresh_user", @params] )
+
+// GET /v1/groups/{id}
+// path: id
+get_group[@c, @params = {:}] ( # @rt.call[@c, "get_group", @params] )
+
+// GET /v1/groups/{id}/ban_list
+// path: id
+// query: page
+get_group_ban_list[@c, @params = {:}] ( # @rt.call[@c, "get_group_ban_list", @params] )
+
+// GET /v1/posts/group_calls
+// query: number, group_category_id, from_timestamp, scope
+get_group_calls[@c, @params = {:}] ( # @rt.call[@c, "get_group_calls", @params] )
+
+// GET /v1/groups/created_quota
+get_group_create_quota[@c, @params = {:}] ( # @rt.call[@c, "get_group_create_quota", @params] )
+
+// GET /v1/groups/{group_id}/gift_history
+// path: group_id
+// query: number, from
+get_group_gift_history[@c, @params = {:}] ( # @rt.call[@c, "get_group_gift_history", @params] )
+
+// GET /v1/groups/{group_id}/gift_transactions
+// path: group_id
+// query: number, from
+get_group_gift_transactions[@c, @params = {:}] ( # @rt.call[@c, "get_group_gift_transactions", @params] )
+
+// GET /v1/groups/{group_id}/highlights
+// path: group_id
+// query: from, number
+get_group_highlights[@c, @params = {:}] ( # @rt.call[@c, "get_group_highlights", @params] )
+
+// GET /v1/groups/{id}/members/{userId}
+// path: id, userId
+get_group_member[@c, @params = {:}] ( # @rt.call[@c, "get_group_member", @params] )
+
+// GET /v2/groups/{id}/members
+// path: id
+// query: number, from_id
+get_group_members[@c, @params = {:}] ( # @rt.call[@c, "get_group_members", @params] )
+
+// GET /v2/notification_settings/groups/{id}
+// path: id
+get_group_notification_settings[@c, @params = {:}] ( # @rt.call[@c, "get_group_notification_settings", @params] )
+
+// GET /v1/groups/{group_id}/received_gifts/{gift_id}/senders
+// path: group_id, gift_id
+// query: user_id, timestamp, number
+get_group_received_gift_senders[@c, @params = {:}] ( # @rt.call[@c, "get_group_received_gift_senders", @params] )
+
+// GET /v2/posts/group_timeline
+// query: group_id, from_post_id, reverse, post_type, number, only_root
+get_group_timeline[@c, @params = {:}] ( # @rt.call[@c, "get_group_timeline", @params] )
+
+// GET /v1/groups/unread_status
+// query: from_time
+get_group_unread_status[@c, @params = {:}] ( # @rt.call[@c, "get_group_unread_status", @params] )
+
+// GET /v2/users/hima_users
+// query: from_hima_id, number
+get_hima_users[@c, @params = {:}] ( # @rt.call[@c, "get_hima_users", @params] )
+
+// GET /v1/calls/{call_id}/users/invitable
+// path: call_id
+// query: from_timestamp, user[nickname]
+get_invitable_call_users[@c, @params = {:}] ( # @rt.call[@c, "get_invitable_call_users", @params] )
+
+// GET /v1/groups/{group_id}/users/invitable
+// path: group_id
+// query: from_timestamp, user[nickname]
+get_invitable_group_users[@c, @params = {:}] ( # @rt.call[@c, "get_invitable_group_users", @params] )
+
+// GET /v1/groups/joined_statuses
+// query: ids
+get_joined_group_statuses[@c, @params = {:}] ( # @rt.call[@c, "get_joined_group_statuses", @params] )
+
+// GET /v1/threads/joined_statuses
+// query: ids
+get_joined_thread_statuses[@c, @params = {:}] ( # @rt.call[@c, "get_joined_thread_statuses", @params] )
+
+// GET /v1/chat_rooms/main_list
+// query: from_timestamp
+get_main_chat_rooms[@c, @params = {:}] ( # @rt.call[@c, "get_main_chat_rooms", @params] )
+
+// GET /v2/posts/mine
+// query: from_post_id, number, include_group_post
+get_my_posts[@c, @params = {:}] ( # @rt.call[@c, "get_my_posts", @params] )
+
+// GET /v1/users/reviews/mine
+// query: from_id
+get_my_reviews[@c, @params = {:}] ( # @rt.call[@c, "get_my_reviews", @params] )
+
+// GET /v1/calls/phone_status/{opponent_id}
+// path: opponent_id
+get_phone_status[@c, @params = {:}] ( # @rt.call[@c, "get_phone_status", @params] )
+
+// GET /v1/users/policy_agreements
+get_policy_agreements[@c, @params = {:}] ( # @rt.call[@c, "get_policy_agreements", @params] )
+
+// GET /{countryApiValue}/api/apps/{app}/popular_words
+// path: countryApiValue, app
+get_popular_words[@c, @params = {:}] ( # @rt.call[@c, "get_popular_words", @params] )
+
+// GET /v2/posts/{id}
+// path: id
+// header: cache_control
+get_post[@c, @params = {:}] ( # @rt.call[@c, "get_post", @params] )
+
+// GET /v1/posts/{post_id}/gift_transactions
+// path: post_id
+// query: number, from
+get_post_gift_transactions[@c, @params = {:}] ( # @rt.call[@c, "get_post_gift_transactions", @params] )
+
+// GET /v1/posts/{id}/likers
+// path: id
+// query: from_id
+get_post_likers[@c, @params = {:}] ( # @rt.call[@c, "get_post_likers", @params] )
+
+// GET /v2/posts/{id}/reposts
+// path: id
+// query: from_post_id
+get_post_reposts[@c, @params = {:}] ( # @rt.call[@c, "get_post_reposts", @params] )
+
+// GET /v2/posts/url_metadata
+// query: url
+get_post_url_metadata[@c, @params = {:}] ( # @rt.call[@c, "get_post_url_metadata", @params] )
+
+// GET /v2/posts/multiple
+// query: post_ids
+get_posts_by_ids[@c, @params = {:}] ( # @rt.call[@c, "get_posts_by_ids", @params] )
+
+// GET /v2/posts/tags/{tag}
+// path: tag
+// query: from_post_id, number
+get_posts_by_tag[@c, @params = {:}] ( # @rt.call[@c, "get_posts_by_tag", @params] )
+
+// GET /v1/received_gifts/{gift_id}/senders
+// path: gift_id
+// query: number
+get_received_gift_senders[@c, @params = {:}] ( # @rt.call[@c, "get_received_gift_senders", @params] )
+
+// GET /v1/received_gifts/{gift_transaction_uuid}
+// path: gift_transaction_uuid
+get_received_gift_transaction[@c, @params = {:}] ( # @rt.call[@c, "get_received_gift_transaction", @params] )
+
+// GET /v2/posts/recent_engagement
+// query: number
+get_recent_engagement_posts[@c, @params = {:}] ( # @rt.call[@c, "get_recent_engagement_posts", @params] )
+
+// GET /v1/users/{id}/follow_recommended
+// path: id
+// query: number, page
+get_recommended_follow_users[@c, @params = {:}] ( # @rt.call[@c, "get_recommended_follow_users", @params] )
+
+// POST /v1/posts/recommended_tag
+// form: save_recent_search, tag
+get_recommended_post_tags[@c, @params = {:}] ( # @rt.call[@c, "get_recommended_post_tags", @params] )
+
+// GET /v2/posts/recommended_timeline
+// query: experiment_num, variant_num, number
+get_recommended_timeline[@c, @params = {:}] ( # @rt.call[@c, "get_recommended_timeline", @params] )
+
+// GET /v1/groups/{id}/relatable
+// path: id
+// query: keyword, from
+get_relatable_groups[@c, @params = {:}] ( # @rt.call[@c, "get_relatable_groups", @params] )
+
+// GET /v1/groups/{id}/related
+// path: id
+// query: keyword, from
+get_related_groups[@c, @params = {:}] ( # @rt.call[@c, "get_related_groups", @params] )
+
+// GET /v1/users/reset_counters
+get_reset_counters[@c, @params = {:}] ( # @rt.call[@c, "get_reset_counters", @params] )
+
+// GET /v2/conversations/root_posts
+// query: ids
+get_root_posts[@c, @params = {:}] ( # @rt.call[@c, "get_root_posts", @params] )
+
+// GET /v1/threads/{id}
+// path: id
+get_thread[@c, @params = {:}] ( # @rt.call[@c, "get_thread", @params] )
+
+// GET /v1/threads/{id}/posts
+// path: id
+// query: post_type, number, from
+get_thread_posts[@c, @params = {:}] ( # @rt.call[@c, "get_thread_posts", @params] )
+
+// GET /v2/posts/{noreply_mode}timeline
+// path: noreply_mode
+// query: order_by, experiment_older_age_rules, from, from_post_id, number, mxn, en, vn, reduce_selfie, custom_generation_range
+get_timeline[@c, @params = {:}] ( # @rt.call[@c, "get_timeline", @params] )
+
+// GET /v1/users/secret
+get_two_factor_auth_request_info[@c, @params = {:}] ( # @rt.call[@c, "get_two_factor_auth_request_info", @params] )
+
+// GET /v1/users/secret/status
+get_two_factor_auth_status[@c, @params = {:}] ( # @rt.call[@c, "get_two_factor_auth_status", @params] )
+
+// GET /v2/chat_rooms/update
+// query: from_time
+get_updated_chat_rooms[@c, @params = {:}] ( # @rt.call[@c, "get_updated_chat_rooms", @params] )
+
+// GET /v2/users/{id}
+// path: id
+get_user[@c, @params = {:}] ( # @rt.call[@c, "get_user", @params] )
+
+// GET /api/v2/user_activities
+// query: from_timestamp
+get_user_activities[@c, @params = {:}] ( # @rt.call[@c, "get_user_activities", @params] )
+
+// GET /api/user_activities
+// query: important, from_timestamp, number
+get_user_activities_v1[@c, @params = {:}] ( # @rt.call[@c, "get_user_activities_v1", @params] )
+
+// GET /v1/users/qr_codes/{qr}
+// path: qr
+get_user_by_qr[@c, @params = {:}] ( # @rt.call[@c, "get_user_by_qr", @params] )
+
+// GET /v1/users/custom_definitions
+get_user_custom_definitions[@c, @params = {:}] ( # @rt.call[@c, "get_user_custom_definitions", @params] )
+
+// GET /v3/users/{id}/followers
+// path: id
+// query: from, followed_by_me, user[nickname]
+get_user_followers[@c, @params = {:}] ( # @rt.call[@c, "get_user_followers", @params] )
+
+// GET /v3/users/{id}/followings
+// path: id
+// query: from, from_timestamp, order_by, user[nickname]
+get_user_followings[@c, @params = {:}] ( # @rt.call[@c, "get_user_followings", @params] )
+
+// GET /v1/users/{user_id}/gift_transactions
+// path: user_id
+// query: number, from
+get_user_gift_transactions[@c, @params = {:}] ( # @rt.call[@c, "get_user_gift_transactions", @params] )
+
+// GET /v1/groups/user_group_list
+// query: page, user_id
+get_user_group_list[@c, @params = {:}] ( # @rt.call[@c, "get_user_group_list", @params] )
+
+// GET /v2/users/info/{id}
+// path: id
+get_user_info[@c, @params = {:}] ( # @rt.call[@c, "get_user_info", @params] )
+
+// GET /v1/users/interests
+get_user_interests[@c, @params = {:}] ( # @rt.call[@c, "get_user_interests", @params] )
+
+// GET /v1/users/presigned_url
+// query: video_file_name
+get_user_presigned_url[@c, @params = {:}] ( # @rt.call[@c, "get_user_presigned_url", @params] )
+
+// GET /v2/users/reviews/{id}
+// path: id
+// query: from_id
+get_user_reviews[@c, @params = {:}] ( # @rt.call[@c, "get_user_reviews", @params] )
+
+// GET /v2/posts/user_timeline
+// query: user_id, from_post_id, post_type, number
+get_user_timeline[@c, @params = {:}] ( # @rt.call[@c, "get_user_timeline", @params] )
+
+// GET /v2/users/timestamp
+get_user_timestamp[@c, @params = {:}] ( # @rt.call[@c, "get_user_timestamp", @params] )
+
+// GET /v1/users/list_id
+// query: user_ids
+// header: x_jwt
+get_users_by_ids[@c, @params = {:}] ( # @rt.call[@c, "get_users_by_ids", @params] )
+
+// GET /v1/users/ws_token
+get_web_socket_token[@c, @params = {:}] ( # @rt.call[@c, "get_web_socket_token", @params] )
+
+// POST /v1/hidden/chats
+// form: chat_room_id
+hide_chats[@c, @params = {:}] ( # @rt.call[@c, "hide_chats", @params] )
+
+// POST /v1/hidden/users
+// form: user_id
+hide_users[@c, @params = {:}] ( # @rt.call[@c, "hide_users", @params] )
+
+// POST /v2/calls/invite
+// form: chat_room_id, room_id, room_url
+invite_to_call[@c, @params = {:}] ( # @rt.call[@c, "invite_to_call", @params] )
+
+// POST /v2/chat_rooms/{id}/invite
+// path: id
+// form: with_user_ids
+invite_to_chat_room[@c, @params = {:}] ( # @rt.call[@c, "invite_to_chat_room", @params] )
+
+// POST /v1/calls/conference_calls/{call_id}/invite
+// path: call_id
+// form: user_ids
+invite_to_conference_call[@c, @params = {:}] ( # @rt.call[@c, "invite_to_conference_call", @params] )
+
+// POST /v1/groups/{id}/invite
+// path: id
+// form: user_ids
+invite_to_group[@c, @params = {:}] ( # @rt.call[@c, "invite_to_group", @params] )
+
+// POST /v1/groups/{id}/join
+// path: id
+join_group[@c, @params = {:}] ( # @rt.call[@c, "join_group", @params] )
+
+// POST /v2/chat_rooms/{id}/kick
+// path: id
+// form: with_user_ids
+kick_from_chat_room[@c, @params = {:}] ( # @rt.call[@c, "kick_from_chat_room", @params] )
+
+// POST /v3/calls/conference_calls/{call_id}/kick
+// path: call_id
+// form: ban, uuid
+kick_from_conference_call[@c, @params = {:}] ( # @rt.call[@c, "kick_from_conference_call", @params] )
+
+// POST /v1/calls/leave_agora_channel
+// form: conference_id, user_id
+leave_agora_channel[@c, @params = {:}] ( # @rt.call[@c, "leave_agora_channel", @params] )
+
+// POST /v1/calls/leave_conference_call
+// form: call_sid, conference_id, duration, total_users_in_call
+leave_conference_call[@c, @params = {:}] ( # @rt.call[@c, "leave_conference_call", @params] )
+
+// DELETE /v1/groups/{id}/leave
+// path: id
+leave_group[@c, @params = {:}] ( # @rt.call[@c, "leave_group", @params] )
+
+// POST /v2/posts/like
+// form: post_ids
+like_posts[@c, @params = {:}] ( # @rt.call[@c, "like_posts", @params] )
+
+// GET /v1/games/apps
+// query: number, from_id, ids
+list_game_apps[@c, @params = {:}] ( # @rt.call[@c, "list_game_apps", @params] )
+
+// GET /v1/games/apps/{app_id}/walkthroughs
+// path: app_id
+list_game_walkthroughs[@c, @params = {:}] ( # @rt.call[@c, "list_game_walkthroughs", @params] )
+
+// GET /v1/genres
+// query: number, from
+list_genres[@c, @params = {:}] ( # @rt.call[@c, "list_genres", @params] )
+
+// GET /v2/gifts
+// query: currency, number, from
+list_gifts[@c, @params = {:}] ( # @rt.call[@c, "list_gifts", @params] )
+
+// GET /v1/groups/categories
+// query: page, number
+list_group_categories[@c, @params = {:}] ( # @rt.call[@c, "list_group_categories", @params] )
+
+// GET /v2/groups
+// query: group_category_id, keyword, from_timestamp, sub_category_id
+list_groups[@c, @params = {:}] ( # @rt.call[@c, "list_groups", @params] )
+
+// GET /v1/hidden/chats
+// query: number, from_timestamp
+list_hidden_chats[@c, @params = {:}] ( # @rt.call[@c, "list_hidden_chats", @params] )
+
+// GET /v1/hidden/users
+// query: from, number
+list_hidden_users[@c, @params = {:}] ( # @rt.call[@c, "list_hidden_users", @params] )
+
+// GET /v1/hidden/words
+list_mute_keywords[@c, @params = {:}] ( # @rt.call[@c, "list_mute_keywords", @params] )
+
+// GET /v1/group_mute/{id}/muted_users
+// path: id
+// query: keyword, cursor, size
+list_muted_group_users[@c, @params = {:}] ( # @rt.call[@c, "list_muted_group_users", @params] )
+
+// GET /v2/groups/mine
+// query: from_timestamp
+list_my_groups[@c, @params = {:}] ( # @rt.call[@c, "list_my_groups", @params] )
+
+// GET /v2/received_gifts
+list_received_gifts[@c, @params = {:}] ( # @rt.call[@c, "list_received_gifts", @params] )
+
+// GET /v1/received_gifts
+// query: from, number
+list_received_gifts_v1[@c, @params = {:}] ( # @rt.call[@c, "list_received_gifts_v1", @params] )
+
+// GET /v2/sticker_packs
+list_sticker_packs[@c, @params = {:}] ( # @rt.call[@c, "list_sticker_packs", @params] )
+
+// GET /v1/threads
+// query: group_id, from, join_status
+list_threads[@c, @params = {:}] ( # @rt.call[@c, "list_threads", @params] )
+
+// login_with_email は src/mod_head.dol の手書きの関数を使う
+
+// POST /v1/users/logout
+// form: uuid
+logout[@c, @params = {:}] ( # @rt.call[@c, "logout", @params] )
+
+// PUT /v3/posts/{id}/move_to_thread/{thread_id}
+// path: id, thread_id
+move_post_to_specific_thread[@c, @params = {:}] ( # @rt.call[@c, "move_post_to_specific_thread", @params] )
+
+// POST /v3/posts/{id}/move_to_thread
+// path: id
+// form: thread_icon_filename, title
+move_post_to_thread[@c, @params = {:}] ( # @rt.call[@c, "move_post_to_thread", @params] )
+
+// POST /v1/group_mute/{id}/mute/{user_id}
+// path: id, user_id
+mute_group_user[@c, @params = {:}] ( # @rt.call[@c, "mute_group_user", @params] )
+
+// POST /api/v1/oauth/token
+// form: email, grant_type, password, refresh_token
+oauth_token[@c, @params = {:}] ( # @rt.call[@c, "oauth_token", @params] )
+
+// POST /v1/chat_rooms/{id}/pinned
+// path: id
+pin_chat_room[@c, @params = {:}] ( # @rt.call[@c, "pin_chat_room", @params] )
+
+// POST /v1/pinned/groups
+// form: id
+pin_group[@c, @params = {:}] ( # @rt.call[@c, "pin_group", @params] )
+
+// PUT /v1/groups/{group_id}/highlights/{post_id}
+// path: group_id, post_id
+pin_group_highlight_post[@c, @params = {:}] ( # @rt.call[@c, "pin_group_highlight_post", @params] )
+
+// PUT /v2/posts/group_pinned_post
+// form: group_id, post_id
+pin_group_post[@c, @params = {:}] ( # @rt.call[@c, "pin_group_post", @params] )
+
+// POST /v1/pinned/posts
+// form: id
+pin_post[@c, @params = {:}] ( # @rt.call[@c, "pin_post", @params] )
+
+// POST /v1/pinned/reviews
+// form: id
+pin_review[@c, @params = {:}] ( # @rt.call[@c, "pin_review", @params] )
+
+// POST /v1/users/alive
+ping_alive[@c, @params = {:}] ( # @rt.call[@c, "ping_alive", @params] )
+
+// POST /v1/chat_rooms/{id}/attachments_read
+// path: id
+// body: body（JSON）
+read_chat_attachments[@c, @params = {:}] ( # @rt.call[@c, "read_chat_attachments", @params] )
+
+// POST /v2/chat_rooms/{id}/messages/{message_id}/read
+// path: id, message_id
+read_chat_message[@c, @params = {:}] ( # @rt.call[@c, "read_chat_message", @params] )
+
+// POST /v1/chat_rooms/{id}/videos_read
+// path: id
+// form: video_msg_ids
+read_chat_videos[@c, @params = {:}] ( # @rt.call[@c, "read_chat_videos", @params] )
+
+// DELETE /v2/chat_rooms/{id}/background
+// path: id
+remove_chat_room_background[@c, @params = {:}] ( # @rt.call[@c, "remove_chat_room_background", @params] )
+
+// POST /v2/users/remove_cover_image
+remove_cover_image[@c, @params = {:}] ( # @rt.call[@c, "remove_cover_image", @params] )
+
+// DELETE /v3/groups/{id}/cover
+// path: id
+remove_group_cover[@c, @params = {:}] ( # @rt.call[@c, "remove_group_cover", @params] )
+
+// DELETE /v1/groups/{id}/deputize
+// path: id
+remove_group_deputies[@c, @params = {:}] ( # @rt.call[@c, "remove_group_deputies", @params] )
+
+// DELETE /v3/groups/{id}/icon
+// path: id
+remove_group_icon[@c, @params = {:}] ( # @rt.call[@c, "remove_group_icon", @params] )
+
+// POST /v2/users/remove_profile_photo
+remove_profile_photo[@c, @params = {:}] ( # @rt.call[@c, "remove_profile_photo", @params] )
+
+// DELETE /v1/groups/{id}/related
+// path: id
+// query: related_group_id
+remove_related_groups[@c, @params = {:}] ( # @rt.call[@c, "remove_related_groups", @params] )
+
+// DELETE /v1/threads/{thread_id}/members/{id}
+// path: thread_id, id
+remove_thread_member[@c, @params = {:}] ( # @rt.call[@c, "remove_thread_member", @params] )
+
+// POST /v2/users/reviews/{id}
+// path: id
+// form: api_key, comment, context, signed_info, timestamp, uuid
+reply_to_review[@c, @params = {:}] ( # @rt.call[@c, "reply_to_review", @params] )
+
+// POST /v3/chat_rooms/{chat_room_id}/report
+// path: chat_room_id
+// form: category_id, opponent_id, reason, screenshot_2_filename, screenshot_3_filename, screenshot_4_filename, screenshot_filename
+report_chat_room[@c, @params = {:}] ( # @rt.call[@c, "report_chat_room", @params] )
+
+// POST /v3/groups/{group_id}/report
+// path: group_id
+// form: category_id, opponent_id, reason, screenshot_2_filename, screenshot_3_filename, screenshot_4_filename, screenshot_filename
+report_group[@c, @params = {:}] ( # @rt.call[@c, "report_group", @params] )
+
+// POST /v3/posts/{post_id}/report
+// path: post_id
+// form: category_id, opponent_id, reason, screenshot_2_filename, screenshot_3_filename, screenshot_4_filename, screenshot_filename
+report_post[@c, @params = {:}] ( # @rt.call[@c, "report_post", @params] )
+
+// POST /v3/users/{user_id}/report
+// path: user_id
+// form: category_id, reason, screenshot_2_filename, screenshot_3_filename, screenshot_4_filename, screenshot_filename
+report_user[@c, @params = {:}] ( # @rt.call[@c, "report_user", @params] )
+
+// POST /v3/posts/repost
+// form: attachment_2_filename, attachment_3_filename, attachment_4_filename, attachment_5_filename, attachment_6_filename, attachment_7_filename, attachment_8_filename, attachment_9_filename, attachment_filename, choices, color, font_size, group_id, in_reply_to, language, mention_ids, message_tags, post_id, post_type, shared_url, text, video_file_name
+// header: x_jwt
+repost[@c, @params = {:}] ( # @rt.call[@c, "repost", @params] )
+
+// POST /v1/email_verification_urls
+// form: device_uuid, email, intent, locale
+request_email_verification[@c, @params = {:}] ( # @rt.call[@c, "request_email_verification", @params] )
+
+// POST /v2/users/{target_id}/follow_request
+// path: target_id
+// form: action
+request_follow[@c, @params = {:}] ( # @rt.call[@c, "request_follow", @params] )
+
+// POST /v1/groups/{id}/request_walkthrough
+// path: id
+request_group_walkthrough[@c, @params = {:}] ( # @rt.call[@c, "request_group_walkthrough", @params] )
+
+// POST /v2/users/resend_confirm_email
+resend_confirm_email[@c, @params = {:}] ( # @rt.call[@c, "resend_confirm_email", @params] )
+
+// POST /v1/users/reset_counters
+// form: counter
+reset_counters[@c, @params = {:}] ( # @rt.call[@c, "reset_counters", @params] )
+
+// PUT /v1/users/reset_password
+// form: email, email_grant_token, password
+reset_password[@c, @params = {:}] ( # @rt.call[@c, "reset_password", @params] )
+
+// GET /v2/groups/{id}/posts/search
+// path: id
+// query: keyword, from_post_id, number, only_thread_posts
+search_group_posts[@c, @params = {:}] ( # @rt.call[@c, "search_group_posts", @params] )
+
+// GET /v2/posts/search
+// query: keyword, post_owner_scope, only_media, from_post_id, number
+search_posts[@c, @params = {:}] ( # @rt.call[@c, "search_posts", @params] )
+
+// GET /v1/users/search
+// query: gender, nickname, title, biography, from_timestamp, similar_age, not_recent_gomimushi, recently_created, same_prefecture, save_recent_search
+search_users[@c, @params = {:}] ( # @rt.call[@c, "search_users", @params] )
+
+// POST /v3/chat_rooms/{id}/messages/new
+// path: id
+// form: attachment_file_name, call_type, font_size, gif_image_id, message_type, parent_id, sticker_id, sticker_pack_id, text, video_file_name
+send_chat_message[@c, @params = {:}] ( # @rt.call[@c, "send_chat_message", @params] )
+
+// POST /v1/groups/{id}/set_title
+// path: id
+// form: title
+set_group_title[@c, @params = {:}] ( # @rt.call[@c, "set_group_title", @params] )
+
+// POST /v1/users/hima
+set_hima[@c, @params = {:}] ( # @rt.call[@c, "set_hima", @params] )
+
+// POST /v2/calls/start_conference_call
+// form: call_sid, conference_id
+start_conference_call[@c, @params = {:}] ( # @rt.call[@c, "start_conference_call", @params] )
+
+// POST /v1/groups/{id}/take_over
+// path: id
+take_over_group[@c, @params = {:}] ( # @rt.call[@c, "take_over_group", @params] )
+
+// POST /v3/groups/{id}/transfer
+// path: id
+// form: api_key, signed_info, timestamp, user_id, uuid
+transfer_group[@c, @params = {:}] ( # @rt.call[@c, "transfer_group", @params] )
+
+// POST /v1/groups/{id}/unban/{userId}
+// path: id, userId
+unban_group_user[@c, @params = {:}] ( # @rt.call[@c, "unban_group_user", @params] )
+
+// POST /v2/users/{id}/unblock
+// path: id
+unblock_user[@c, @params = {:}] ( # @rt.call[@c, "unblock_user", @params] )
+
+// POST /v2/users/{id}/unfollow
+// path: id
+unfollow_user[@c, @params = {:}] ( # @rt.call[@c, "unfollow_user", @params] )
+
+// DELETE /v1/hidden/chats
+// query: chat_room_ids
+unhide_chats[@c, @params = {:}] ( # @rt.call[@c, "unhide_chats", @params] )
+
+// DELETE /v1/hidden/users
+// query: user_ids
+unhide_users[@c, @params = {:}] ( # @rt.call[@c, "unhide_users", @params] )
+
+// POST /v1/posts/{id}/unlike
+// path: id
+unlike_post[@c, @params = {:}] ( # @rt.call[@c, "unlike_post", @params] )
+
+// DELETE /v1/group_mute/{id}/unmute/{user_id}
+// path: id, user_id
+unmute_group_user[@c, @params = {:}] ( # @rt.call[@c, "unmute_group_user", @params] )
+
+// DELETE /v1/chat_rooms/{id}/pinned
+// path: id
+unpin_chat_room[@c, @params = {:}] ( # @rt.call[@c, "unpin_chat_room", @params] )
+
+// DELETE /v1/pinned/groups/{id}
+// path: id
+unpin_group[@c, @params = {:}] ( # @rt.call[@c, "unpin_group", @params] )
+
+// DELETE /v1/groups/{group_id}/highlights/{post_id}
+// path: group_id, post_id
+unpin_group_highlight_post[@c, @params = {:}] ( # @rt.call[@c, "unpin_group_highlight_post", @params] )
+
+// DELETE /v2/posts/group_pinned_post
+// query: group_id
+unpin_group_post[@c, @params = {:}] ( # @rt.call[@c, "unpin_group_post", @params] )
+
+// DELETE /v1/pinned/posts/{id}
+// path: id
+unpin_post[@c, @params = {:}] ( # @rt.call[@c, "unpin_post", @params] )
+
+// DELETE /v1/pinned/reviews/{id}
+// path: id
+unpin_review[@c, @params = {:}] ( # @rt.call[@c, "unpin_review", @params] )
+
+// POST /v1/users/additonal_notification_setting
+// form: mode, on
+update_additional_notification_setting[@c, @params = {:}] ( # @rt.call[@c, "update_additional_notification_setting", @params] )
+
+// PUT /v1/calls/{call_id}
+// path: call_id
+// form: category_id, game_title, joinable_by
+update_call[@c, @params = {:}] ( # @rt.call[@c, "update_call", @params] )
+
+// PUT /v1/calls/{call_id}/users/{user_id}
+// path: call_id, user_id
+// form: role
+update_call_user[@c, @params = {:}] ( # @rt.call[@c, "update_call_user", @params] )
+
+// POST /v3/chat_rooms/{id}/edit
+// path: id
+// form: background_filename, icon_filename, name
+update_chat_room[@c, @params = {:}] ( # @rt.call[@c, "update_chat_room", @params] )
+
+// POST /v2/notification_settings/chat_rooms/{id}
+// path: id
+// form: notification_chat
+update_chat_room_notification_settings[@c, @params = {:}] ( # @rt.call[@c, "update_chat_room_notification_settings", @params] )
+
+// POST /v3/groups/{id}/update
+// path: id
+// form: allow_members_to_post_image_and_video, allow_members_to_post_url, allow_ownership_transfer, allow_thread_creation_by, api_key, call_timeline_display, cover_image_filename, description, gender, generation_groups_limit, group_category_id, group_icon_filename, guidelines, hide_conference_call, hide_from_game_eight, hide_reported_posts, is_private, only_mobile_verified, only_verified_age, secret, signed_info, sub_category_id, timestamp, topic, uuid
+update_group[@c, @params = {:}] ( # @rt.call[@c, "update_group", @params] )
+
+// POST /v2/notification_settings/groups/{id}
+// path: id
+// form: notification_group_join, notification_group_message_tag_all, notification_group_post, notification_group_request
+update_group_notification_settings[@c, @params = {:}] ( # @rt.call[@c, "update_group_notification_settings", @params] )
+
+// PUT /v1/users/language
+// form: api_key, language, signed_info, timestamp, uuid
+update_language[@c, @params = {:}] ( # @rt.call[@c, "update_language", @params] )
+
+// POST /v3/users/login_update
+// form: api_key, current_password, email, email_grant_token, password
+update_login[@c, @params = {:}] ( # @rt.call[@c, "update_login", @params] )
+
+// PUT /v1/hidden/words/{id}
+// path: id
+// body: body（JSON）
+update_mute_keyword[@c, @params = {:}] ( # @rt.call[@c, "update_mute_keyword", @params] )
+
+// PUT /v3/posts/{id}
+// path: id
+// form: api_key, color, font_size, language, message_tags, signed_info, text, timestamp, uuid
+update_post[@c, @params = {:}] ( # @rt.call[@c, "update_post", @params] )
+
+// PUT /v1/groups/{id}/related
+// path: id
+// query: related_group_id
+update_related_groups[@c, @params = {:}] ( # @rt.call[@c, "update_related_groups", @params] )
+
+// PUT /v1/threads/{id}
+// path: id
+// form: thread_icon_filename, title
+update_thread[@c, @params = {:}] ( # @rt.call[@c, "update_thread", @params] )
+
+// PUT /v1/users/interests
+// body: body（JSON）
+update_user_interests[@c, @params = {:}] ( # @rt.call[@c, "update_user_interests", @params] )
+
+// GET /v2/calls/action_signature/validate
+// query: call_id, sender_uuid, receiver_uuid, action, timestamp, signature
+validate_call_action_signature[@c, @params = {:}] ( # @rt.call[@c, "validate_call_action_signature", @params] )
+
+// POST /v1/posts/validate
+// form: group_id, text, thread_id
+validate_post[@c, @params = {:}] ( # @rt.call[@c, "validate_post", @params] )
+
+// POST /v1/posts/videos/{videoId}/view
+// path: videoId
+view_post_video[@c, @params = {:}] ( # @rt.call[@c, "view_post_video", @params] )
+
+// POST /v1/groups/{id}/visit
+// path: id
+visit_group[@c, @params = {:}] ( # @rt.call[@c, "visit_group", @params] )
+
+// POST /v2/surveys/{id}/vote
+// path: id
+// form: choice_id
+vote_survey[@c, @params = {:}] ( # @rt.call[@c, "vote_survey", @params] )
+
+// PUT /v1/groups/{group_id}/deputize/{user_id}/withdraw
+// path: group_id, user_id
+withdraw_group_deputy[@c, @params = {:}] ( # @rt.call[@c, "withdraw_group_deputy", @params] )
+
+// PUT /v1/groups/{id}/transfer/withdraw
+// path: id
+// form: user_id
+withdraw_group_transfer[@c, @params = {:}] ( # @rt.call[@c, "withdraw_group_transfer", @params] )

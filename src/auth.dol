@@ -1,0 +1,156 @@
+// ログイン（PORTING.md 6 章）
+//
+// `login_with_email` が唯一の認証の入口。キャッシュ（セッションストア）→ ブラウザ版のログイン →
+// アプリ版のログインの順に試す。結果のトークンはクライアントに設定される。
+
+@json := import["std:json"]
+@util := import["./util.dol"]
+@call := import["./call.dol"]
+@errors := import["./errors.dol"]
+@transport := import["./transport.dol"]
+
+@web_user_agent := "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+// メールアドレスとパスワードでログインする。
+// `params`: email, password（必須）、two_fa_code、api_key（渡すとアプリ版だけを、そのキーで試す）、
+//           uuid（端末の UUID。既定はクライアントのもの）、no_cache（true ならキャッシュを使わない）。
+// 戻り値はログインの応答（{"user_id", "access_token", "refresh_token", …}）。
+// キャッシュから戻したときは user_id と 2 つのトークンだけ。
+// ログインできたがセッションを保存できなかったときは、種類 "session_save_failed" のエラー値
+// （`err_data` の "response" に応答。トークンはクライアントに設定済み）
+login_with_email[@c, @params] (
+    assert[type_of[map_get[@params, "email", nil]] == "string", "yaylib: login_with_email には email が必要です"]
+    @body := fill_body[@c, @params]
+    @email := @body{"email"}
+    @restored := maybe_restore[@c, @email, map_get[@params, "no_cache", false]]?
+    if @restored != nil ( # @restored )
+    @fresh := fresh_login[@c, @body]?
+    # accept_login[@c, @email, @fresh{"response"}, @fresh{"oauth_key"}]
+)
+
+// api_key と uuid を、渡されていなければクライアントのもので埋める
+fill_body[@c, @params] (
+    @body := {
+        "email": @params{"email"},
+        "password": map_get[@params, "password", ""],
+        "api_key": map_get[@params, "api_key", @c{"api_key"}],
+        "uuid": map_get[@params, "uuid", @c{"device_uuid"}]
+    }
+    @code := map_get[@params, "two_fa_code", nil]
+    if @code != nil && @code != "" ( @body{"two_fa_code"} = @code )
+    # @body
+)
+
+// ブラウザ版を先に、アプリ版を後に試す。成功したら {"response": 応答, "oauth_key": このセッションを作ったキー}
+fresh_login[@c, @body] (
+    // 呼ぶ側が api_key を指定したら、そのキーでアプリ版だけを試す
+    @pinned := @body{"api_key"} != @c{"api_key"}
+    if @c{"web_api_key"} == "" || @pinned (
+        @resp := login_app[@c, @body]?
+        # {"response": @resp, "oauth_key": @body{"api_key"}}
+    )
+    @web := login_web[@c, @body]
+    if !is_error[@web] ( # {"response": @web, "oauth_key": @c{"web_api_key"}} )
+    // 「認証できない」(error_code 401) のときだけアプリ版に切り替える。2 要素認証が要るなどは、そのまま返す
+    if @errors.code_of[@web] != @errors.error_codes[]{"unauthorized"} ( # @web )
+    @transport.log_event[@c, "debug", "login_fallback", {"outcome": "attempt"}]
+    @app := login_app[@c, @body]
+    if !is_error[@app] (
+        @transport.log_event[@c, "debug", "login_fallback", {"outcome": "ok"}]
+        # {"response": @app, "oauth_key": @body{"api_key"}}
+    )
+    @transport.log_event[@c, "debug", "login_fallback", {"outcome": "failed"}]
+    // 両方だめなら、ブラウザ版のエラー（コードと本文が付いている）
+    # @web
+)
+
+login_app[@c, @body] (
+    # @call.call[@c, "login_with_email", {"body": @body}]
+)
+
+// ブラウザ版のログイン。アプリのヘッダー・認証・再試行は付けず、ブラウザらしい最小のヘッダーで送る
+login_web[@c, @body] (
+    @payload := {
+        "email": @body{"email"},
+        "password": @body{"password"},
+        "api_key": @c{"web_api_key"},
+        "uuid": @body{"uuid"}
+    }
+    if map_has[@body, "two_fa_code"] ( @payload{"two_fa_code"} = @body{"two_fa_code"} )
+    @text := @json.stringify[@payload]?
+    @resp := @transport.send_bare[@c, {
+        "method": "POST",
+        "url": "@{@c{"base_url"}}/v2/users/login_with_email",
+        "headers": {
+            "Content-Type": "application/json;charset=UTF-8",
+            "User-Agent": @web_user_agent,
+            "Agent": "YayWeb @{@c{"app_version"}}",
+            "X-Device-Info": "Yay @{@c{"app_version"}} Web (@{@web_user_agent})"
+        },
+        "body": str_to_bytes[@text]
+    }]?
+    if @resp{"status"} < 200 || @resp{"status"} > 299 (
+        # @errors.api_error[@resp{"status"}, @resp{"headers"}, @resp{"body"}]
+    )
+    # @call.decode_body[@resp]
+)
+
+// ---- セッション ----
+
+// セッションをクライアントに適用する
+activate[@c, @email, @user_id, @access, @refresh, @oauth_key] (
+    @c{"email"} = @email
+    @c{"user_id"} = @user_id
+    @c{"oauth_key"} = @oauth_key
+    @c{"access_token"} = @access
+    @c{"refresh_token"} = @refresh
+    # nil
+)
+
+// ストアに保存してあるセッションを、クライアントに戻す。なければ nil。ストアが壊れていればエラー値
+load_session[@c, @email] (
+    @store := @c{"session_store"}
+    if @store == nil || @email == "" ( # nil )
+    @session := @store{"load"}[@email]
+    if is_error[@session] (
+        @transport.log_event[@c, "warn", "session_load_fail", {"err": err_message[@session]}]
+        # err_new["session_load", "セッションを読めません: @{err_message[@session]}", err_data[@session]]
+    )
+    if @session == nil ( # nil )
+    if map_has[@session, "device_uuid"] && @session{"device_uuid"} != "" ( @c{"device_uuid"} = @session{"device_uuid"} )
+    activate[@c, @email, map_get[@session, "user_id", 0], @session{"access_token"}, @session{"refresh_token"}, map_get[@session, "oauth_key", @c{"api_key"}]]
+    # @session
+)
+
+// セッションを保存する（ログイン済みのとき）
+save_session[@c] (
+    @store := @c{"session_store"}
+    if @store == nil || @c{"email"} == "" ( # nil )
+    # @store{"save"}[{
+        "email": @c{"email"},
+        "user_id": @c{"user_id"},
+        "access_token": @c{"access_token"},
+        "refresh_token": @c{"refresh_token"},
+        "device_uuid": @c{"device_uuid"},
+        "oauth_key": @c{"oauth_key"}
+    }]
+)
+
+// キャッシュにあれば、それを使う（応答は user_id とトークンだけ）。なければ nil。
+// ストアが壊れているときはエラー値（そのまま新しくログインすると、ログインの回数制限を使い切るため）
+maybe_restore[@c, @email, @skip] (
+    if @skip || @c{"session_store"} == nil || @email == "" ( # nil )
+    @session := load_session[@c, @email]?
+    if @session == nil ( # nil )
+    # {"user_id": map_get[@session, "user_id", 0], "access_token": @session{"access_token"}, "refresh_token": @session{"refresh_token"}}
+)
+
+// ログインできたあと。トークンを有効にして、ストアがあれば保存する
+accept_login[@c, @email, @resp, @oauth_key] (
+    activate[@c, @email, map_get[@resp, "user_id", 0], map_get[@resp, "access_token", ""], map_get[@resp, "refresh_token", ""], @oauth_key]
+    @saved := save_session[@c]
+    if is_error[@saved] (
+        # err_new["session_save_failed", "ログインできましたが、セッションを保存できません: @{err_message[@saved]}", {"response": @resp}]
+    )
+    # @resp
+)

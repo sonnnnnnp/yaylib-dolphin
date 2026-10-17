@@ -1,0 +1,114 @@
+// 小さな道具（パラメーターの文字列化、クエリ・フォームの組み立て）
+
+@enc := import["std:encoding"]
+@crypto := import["std:crypto"]
+@time := import["std:time"]
+
+// 値をクエリ・フォームに載せる文字列にする（Go 版の parameterAddToHeaderOrQuery と同じ）
+value_str[@v] (
+    @t := type_of[@v]
+    if @t == "string" ( # @v )
+    if @t == "number" ( # to_str[@v] )
+    if @t == "bool" (
+        if @v ( # "true" ) else ( # "false" )
+    )
+    if @t == "nil" ( # "null" )
+    # to_str[@v]
+)
+
+// `pairs`（{キー, 値} の配列）に、`key` の値を足す。
+// 配列は要素ごとに足す（`mode` が "csv" なら 1 つのキーにコンマでつなぐ）。マップは `key[名前]` に展開する
+add_param[@pairs, @key, @value, @mode] (
+    @t := type_of[@value]
+    if @t == "array" (
+        for @item in @value (
+            add_param[@pairs, @key, @item, @mode]
+        )
+        # nil
+    )
+    if @t == "map" (
+        for @entry in map_items[@value] (
+            add_param[@pairs, "@{@key}[@{@entry{0}}]", @entry{1}, @mode]
+        )
+        # nil
+    )
+    @text := value_str[@value]
+    if @mode == "csv" (
+        for @pair in @pairs (
+            if @pair{0} == @key (
+                @pair{1} = "@{@pair{1}},@{@text}"
+                # nil
+            )
+        )
+    )
+    arr_push[@pairs, {@key, @text}]
+    # nil
+)
+
+// キーの昇順（同じキーの中は元の順）に並べる。Go の url.Values.Encode と同じ
+sorted_pairs[@pairs] (
+    # arr_sort_by[@pairs, [@a, @b] (
+        if @a{0} < @b{0} ( # -1 )
+        if @a{0} > @b{0} ( # 1 )
+        # 0
+    )]
+)
+
+// Go の url.QueryEscape 相当（空白は `+`）
+query_escape[@s] (
+    # str_replace[@enc.url_encode[@s], "%20", "+"]
+)
+
+// `a=1&b=2` の形（キーの `[` `]` はそのまま）
+encode_pairs[@pairs] (
+    @parts := {}
+    for @pair in sorted_pairs[@pairs] (
+        @key := str_replace[str_replace[query_escape[@pair{0}], "%5B", "["], "%5D", "]"]
+        arr_push[@parts, "@{@key}=@{query_escape[@pair{1}]}"]
+    )
+    # str_join[@parts, "&"]
+)
+
+// multipart/form-data の本体。{"content_type": …, "body": バイト列}
+multipart[@pairs] (
+    @boundary := @enc.hex_encode[@crypto.random_bytes[24]]
+    @out := ""
+    for @pair in @pairs (
+        @name := str_replace[@pair{0}, "\"", "%22"]
+        @out = "@{@out}--@{@boundary}\r\nContent-Disposition: form-data; name=\"@{@name}\"\r\n\r\n@{@pair{1}}\r\n"
+    )
+    @out = "@{@out}--@{@boundary}--\r\n"
+    # {"content_type": "multipart/form-data; boundary=@{@boundary}", "body": str_to_bytes[@out]}
+)
+
+// ヘッダーのマップから、名前の大文字小文字を無視して値を引く（なければ nil）
+header_get[@headers, @name] (
+    @lower := str_lower[@name]
+    for @item in map_items[@headers] (
+        if str_lower[@item{0}] == @lower ( # @item{1} )
+    )
+    # nil
+)
+
+// ヘッダーに値がなければ設定する（名前の大文字小文字を無視）
+header_set_if_absent[@headers, @name, @value] (
+    if header_get[@headers, @name] == nil (
+        @headers{@name} = @value
+    )
+    # nil
+)
+
+// ヘッダーを設定する（同じ名前が別の大文字小文字であれば取り除いてから）
+header_set[@headers, @name, @value] (
+    @lower := str_lower[@name]
+    for @key in map_keys[@headers] (
+        if str_lower[@key] == @lower ( map_remove[@headers, @key] )
+    )
+    @headers{@name} = @value
+    # nil
+)
+
+// ミリ秒の Unix 時刻（整数）
+now_ms[] (
+    # floor[@time.now[] * 1000]
+)

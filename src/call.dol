@@ -1,0 +1,127 @@
+// オペレーションの呼び出し（表の 1 行からリクエストを組み立てて、応答を読む）
+//
+// パラメーターは 1 つのマップ（`params`）で渡す。キーは
+//   パスの `{名前}`、クエリ・フォームのキー（`file_names[]` は `file_names`）、
+//   ヘッダー（`X-Jwt` は `x_jwt`）、JSON の本文は `body`。
+// 渡さなかったものは送らない（PORTING.md 12 章 1）。表にないキーは間違いなので、実行時エラーにする。
+
+@json := import["std:json"]
+@enc := import["std:encoding"]
+@util := import["./util.dol"]
+@transport := import["./transport.dol"]
+@errors := import["./errors.dol"]
+@signing := import["./signing.dol"]
+@ops_table := import["./ops_table.dol"]
+
+@table := @ops_table.ops[]
+
+// 表（オペレーション名 → 仕様）
+operations[] (
+    # @table
+)
+
+spec_of[@op_name] (
+    @spec := map_get[@table, @op_name, nil]
+    assert[@spec != nil, "yaylib: 知らないオペレーションです: @{@op_name}"]
+    # @spec
+)
+
+// 使えるキーの一覧
+known_keys[@spec] (
+    @keys := arr_copy[@spec{"path_params"}]
+    for @entry in arr_concat[arr_concat[@spec{"query"}, @spec{"form"}], @spec{"header"}] (
+        arr_push[@keys, @entry{0}]
+    )
+    if @spec{"json_body"} ( arr_push[@keys, "body"] )
+    # @keys
+)
+
+// 渡された値のうち、表のキーに当たるものを {キー, 値} の組にして集める
+collect_pairs[@entries, @params] (
+    @pairs := {}
+    for @entry in @entries (
+        if map_has[@params, @entry{0}] && @params{@entry{0}} != nil (
+            @util.add_param[@pairs, @entry{1}, @params{@entry{0}}, @entry{2}]
+        )
+    )
+    # @pairs
+)
+
+// リクエスト（{"method", "path", "query", "headers", "body"}）を組み立てる。送らない。
+// 失敗（JSON にできない値など）はエラー値
+build_request[@c, @op_name, @params] (
+    @spec := spec_of[@op_name]
+    @known := known_keys[@spec]
+    for @key in map_keys[@params] (
+        assert[arr_contains[@known, @key], "yaylib: @{@op_name} に `@{@key}` は使えません（使えるのは @{str_join[@known, "、"]}）"]
+    )
+    // パス
+    @path := @spec{"path"}
+    for @name in @spec{"path_params"} (
+        assert[map_has[@params, @name] && @params{@name} != nil, "yaylib: @{@op_name} には `@{@name}` が必要です"]
+        @path = str_replace[@path, "{@{@name}}", @enc.url_encode[@util.value_str[@params{@name}]]]
+    )
+    // ヘッダー
+    @headers := {"Accept": "application/json"}
+    for @entry in @spec{"header"} (
+        if map_has[@params, @entry{0}] && @params{@entry{0}} != nil (
+            @headers{@entry{1}} = @util.value_str[@params{@entry{0}}]
+        ) else (
+            // X-Jwt は、渡されなければ作る（有効期間が短いので、呼ぶたびに）
+            if @entry{0} == "x_jwt" ( @headers{@entry{1}} = @signing.x_jwt[@c] )
+        )
+    )
+    // クエリ・本文
+    @query := @util.encode_pairs[collect_pairs[@spec{"query"}, @params]]
+    @form := collect_pairs[@spec{"form"}, @params]
+    @body := nil
+    @content_type := @spec{"content_type"}
+    if @content_type != nil ( @headers{"Content-Type"} = @content_type )
+    if @spec{"json_body"} && map_has[@params, "body"] (
+        @text := @json.stringify[@params{"body"}]?
+        @body = str_to_bytes[@text]
+    )
+    if @content_type != nil && arr_len[@form] > 0 (
+        if str_starts_with[@content_type, "multipart/form-data"] (
+            @m := @util.multipart[@form]
+            @headers{"Content-Type"} = @m{"content_type"}
+            @body = @m{"body"}
+        )
+        if str_starts_with[@content_type, "application/x-www-form-urlencoded"] (
+            @body = str_to_bytes[@util.encode_pairs[@form]]
+        )
+    )
+    # {"method": @spec{"method"}, "path": @path, "query": @query, "headers": @headers, "body": @body}
+)
+
+// 2xx の応答の本文を読む（空なら nil）
+decode_body[@resp] (
+    if @resp{"body"} == "" ( # nil )
+    @value := @json.parse[@resp{"body"}]
+    if is_error[@value] (
+        # err_new["decode", "応答の JSON を読めません: @{err_message[@value]}", {"status": @resp{"status"}, "body": @resp{"body"}}]
+    )
+    # @value
+)
+
+// 送って、応答を読む。2xx なら本文（JSON の値。空なら nil）、
+// 2xx 以外はエラー値（"api"、`err_data` に status と本文など）、通信の失敗はそのエラー値
+call[@c, @op_name, @params = {:}] (
+    @req := build_request[@c, @op_name, @params]?
+    @resp := @transport.send_request[@c, @req]?
+    if @resp{"status"} < 200 || @resp{"status"} > 299 (
+        # @errors.api_error[@resp{"status"}, @resp{"headers"}, @resp{"body"}]
+    )
+    # decode_body[@resp]
+)
+
+// `call` と同じだが、本文を読まずに応答をそのまま返す（{"status", "headers", "body"}）。
+// 2xx 以外と通信の失敗は、`call` と同じエラー値
+execute_raw[@c, @op_name, @params = {:}] (
+    @req := build_request[@c, @op_name, @params]?
+    @resp := @transport.send_request[@c, @req]?
+    if @resp{"status"} < 200 || @resp{"status"} > 299 (
+        # @errors.api_error[@resp{"status"}, @resp{"headers"}, @resp{"body"}]
+    )
+    # @resp
+)

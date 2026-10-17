@@ -1,0 +1,22 @@
+// 偽のサーバーに対する、実際の HTTP 通信での動作確認。使い方: dolphin client.dol <ポート>
+@yay := import["../../mod.dol"]
+@os := import["std:os"]
+
+@port := @os.args[]{0}
+@c := @yay.new_client[{"base_url": "http://127.0.0.1:@{@port}", "retry": {"max_attempts": 1}}]
+
+@login := @yay.login_with_email[@c, {"email": "me\@example.com", "password": "pw"}]
+log["login:", @login]
+
+// A1 は期限切れ。401 → 更新 → 送り直しで通る
+@tl := @yay.get_timeline[@c, {"noreply_mode": "", "number": 5}]
+log["timeline:", @tl]
+log["tokens:", @yay.tokens[@c]]
+
+@r := @yay.create_post[@c, {"text": "こんにちは", "post_type": "text", "choices": {"a", "b"}}]
+log["post:", @r]
+@tl2 := @yay.get_timeline[@c, {"noreply_mode": ""}]
+log["posts:", @tl2{"posts"}]
+
+@e := @yay.get_user_info[@c, {"id": 1}]
+log["error:", err_kind[@e], @yay.status_of[@e], @yay.code_of[@e], err_message[@e]]

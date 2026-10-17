@@ -1,0 +1,254 @@
+// yaylib — Yay! の非公式 API クライアント（Dolphin 版）
+//
+// ekkx/yaylib（MIT）の Dolphin への移植。オペレーションの表は tools/gen.py が元の gen/ から作る。
+//   @yay := import["yaylib"]
+//   @c := @yay.new_client[]
+//   @yay.login_with_email[@c, {"email": "…", "password": "…"}]?
+//   @tl := @yay.get_timeline[@c, {"noreply_mode": "", "number": 20}]?
+//
+// このファイルの前半は手書き、後半（オペレーションの関数）は tools/gen.py が作る。
+// `mod.dol` を直接は編集せず、`src/mod_head.dol` を編集して `python tools/gen.py` を実行する。
+
+@rt := import["./src/call.dol"]
+@client_ := import["./src/client.dol"]
+@auth_ := import["./src/auth.dol"]
+@session_ := import["./src/session.dol"]
+@signing_ := import["./src/signing.dol"]
+@errors_ := import["./src/errors.dol"]
+@upload_ := import["./src/upload.dol"]
+@stream_ := import["./src/event_stream.dol"]
+@async_ := import["std:async"]
+
+// このライブラリの版
+version[] (
+    # "0.1.0"
+)
+
+// ---- クライアント ----
+
+// クライアントを作る。何も渡さなくても動く。設定のキーは src/client.dol を参照
+new_client[@options = {:}] (
+    # @client_.new_client[@options]
+)
+
+// 既定の設定のマップ
+defaults[] (
+    # @client_.defaults[]
+)
+
+set_tokens[@c, @access, @refresh] (
+    # @client_.set_tokens[@c, @access, @refresh]
+)
+
+// 今のトークン {"access", "refresh"} の写し
+tokens[@c] (
+    # @client_.tokens[@c]
+)
+
+// ログインせずにトークンから始めるとき、ユーザー ID も設定する
+set_user_id[@c, @user_id] (
+    # @client_.set_user_id[@c, @user_id]
+)
+
+// ---- 認証・セッション ----
+
+// メールアドレスとパスワードでログインする（キャッシュ → ブラウザ版 → アプリ版）。
+// params: email, password, two_fa_code, api_key, uuid, no_cache
+login_with_email[@c, @params] (
+    # @auth_.login_with_email[@c, @params]
+)
+
+// セッションストアから復元する。なければ nil
+load_session[@c, @email] (
+    # @auth_.load_session[@c, @email]
+)
+
+// 今のセッションを保存する
+save_session[@c] (
+    # @auth_.save_session[@c]
+)
+
+// JSON ファイルに保存するセッションストア（`new_client` の `session_store` に渡す）
+file_session_store[@file] (
+    # @session_.file_session_store[@file]
+)
+
+// メモリ上のセッションストア（テスト用）
+memory_session_store[] (
+    # @session_.memory_session_store[]
+)
+
+// ---- 署名 ----
+
+signed_info[@c] (
+    # @signing_.signed_info[@c]
+)
+
+signed_info_at[@c, @timestamp] (
+    # @signing_.signed_info_at[@c, @timestamp]
+)
+
+signed_version[@c] (
+    # @signing_.signed_version[@c]
+)
+
+// X-Jwt（有効期間 5 秒。呼ぶたびに作る）
+x_jwt[@c] (
+    # @signing_.x_jwt[@c]
+)
+
+x_jwt_at[@c, @iat] (
+    # @signing_.x_jwt_at[@c, @iat]
+)
+
+new_uuid[] (
+    # @signing_.new_uuid[]
+)
+
+// ---- エラー ----
+
+// サーバーのエラー {"error_code", "message", "ban_until", "retry_in", "remaining_quota"}。なければ nil
+error_response_of[@e] (
+    # @errors_.error_response_of[@e]
+)
+
+// サーバーのエラーコード（解析できなければ 0）
+code_of[@e] (
+    # @errors_.code_of[@e]
+)
+
+// HTTP のステータス（"api" のエラーでなければ 0）
+status_of[@e] (
+    # @errors_.status_of[@e]
+)
+
+// エラーコードの表（`error_codes[]{"required_2fa"}` は -31）
+error_codes[] (
+    # @errors_.error_codes[]
+)
+
+// ---- 呼び出し ----
+
+// 名前でオペレーションを呼ぶ（`get_timeline[@c, {…}]` と同じ）
+call[@c, @operation, @params = {:}] (
+    # @rt.call[@c, @operation, @params]
+)
+
+// 本文を読まずに、応答 {"status", "headers", "body"} をそのまま返す
+execute_raw[@c, @operation, @params = {:}] (
+    # @rt.execute_raw[@c, @operation, @params]
+)
+
+// オペレーションの表（名前 → メソッド・パス・パラメーター）
+operations[] (
+    # @rt.operations[]
+)
+
+// ---- アップロード ----
+// ファイルは {"filename": "a.png", "data": バイト列}。戻り値は投稿などに渡すサーバー上の名前
+
+upload_avatar_image[@c, @file] (
+    # @upload_.upload_avatar_image[@c, @file]
+)
+
+upload_cover_image[@c, @file] (
+    # @upload_.upload_cover_image[@c, @file]
+)
+
+// 投稿の画像（9 枚まで）
+upload_post_images[@c, @files] (
+    # @upload_.upload_post_images[@c, @files]
+)
+
+upload_chat_message_images[@c, @room_id, @files] (
+    # @upload_.upload_chat_message_images[@c, @room_id, @files]
+)
+
+upload_chat_background_image[@c, @room_id, @file] (
+    # @upload_.upload_chat_background_image[@c, @room_id, @file]
+)
+
+upload_group_icon_image[@c, @group_id, @file] (
+    # @upload_.upload_group_icon_image[@c, @group_id, @file]
+)
+
+upload_group_cover_image[@c, @group_id, @file] (
+    # @upload_.upload_group_cover_image[@c, @group_id, @file]
+)
+
+upload_thread_icon_image[@c, @group_id, @file] (
+    # @upload_.upload_thread_icon_image[@c, @group_id, @file]
+)
+
+upload_signup_avatar_image[@c, @file] (
+    # @upload_.upload_signup_avatar_image[@c, @file]
+)
+
+upload_group_creation_icon_image[@c, @file] (
+    # @upload_.upload_group_creation_icon_image[@c, @file]
+)
+
+upload_group_creation_cover_image[@c, @file] (
+    # @upload_.upload_group_creation_cover_image[@c, @file]
+)
+
+// 通報の画像（4 枚まで）
+upload_report_images[@c, @files] (
+    # @upload_.upload_report_images[@c, @files]
+)
+
+upload_video_call_snapshot_image[@c, @file] (
+    # @upload_.upload_video_call_snapshot_image[@c, @file]
+)
+
+// 動画（mp4 のバイト列）。戻り値は投稿に渡す動画のファイル名
+upload_video[@c, @data] (
+    # @upload_.upload_video[@c, @data]
+)
+
+// アップロードしたファイルの公開 URL
+media_url[@filename] (
+    # @upload_.media_url[@filename]
+)
+
+// ---- イベントストリーム ----
+// コールバックで動く。`run[]`（または std:async の run）でイベントループを動かす
+
+// ストリームを開く。options: reconnect, on_open, on_error, on_reconnect
+open_event_stream[@c, @options = {:}] (
+    # @stream_.open_event_stream[@c, @options]
+)
+
+// 購読する。handlers: on_event, on_confirm, on_reject, on_closed
+subscribe[@stream, @channel, @handlers = {:}] (
+    # @stream_.subscribe[@stream, @channel, @handlers]
+)
+
+unsubscribe[@stream, @subscription] (
+    # @stream_.unsubscribe[@stream, @subscription]
+)
+
+close_event_stream[@stream] (
+    # @stream_.close_event_stream[@stream]
+)
+
+chat_room_channel[] (
+    # @stream_.chat_room_channel[]
+)
+
+messages_channel[@chat_room_id] (
+    # @stream_.messages_channel[@chat_room_id]
+)
+
+group_updates_channel[] (
+    # @stream_.group_updates_channel[]
+)
+
+group_posts_channel[@group_id] (
+    # @stream_.group_posts_channel[@group_id]
+)
+
+// 待っているもの（イベントストリーム・タイマー）がなくなるまで、イベントループを動かす
+run[] (
+    # @async_.run[]
+)

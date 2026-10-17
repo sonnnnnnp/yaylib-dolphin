@@ -1,0 +1,278 @@
+// 画像・動画のアップロード（PORTING.md 9 章）
+//
+// 手順: 縦横を調べる → サムネイルを作る → 署名付き URL をもらう → 生のバイト列を PUT する。
+// 署名付き URL への PUT には、Yay! のヘッダーも Authorization も付けない。
+// ファイルは {"filename": "a.png", "data": バイト列}。戻り値はサーバーが付けた名前
+// （投稿や更新に渡すのはこの名前。ローカルのパスではない）。
+// 一度に送れる画像は 9 枚（通報は 4 枚）。画像は `std:image` で読む（png / jpeg / gif）。
+
+@time := import["std:time"]
+@crypto := import["std:crypto"]
+@img := import["std:image"]
+@path := import["std:path"]
+@util := import["./util.dol"]
+@call := import["./call.dol"]
+@transport := import["./transport.dol"]
+
+@max_images := 9
+@max_report_images := 4
+// 公開 CDN の接頭辞
+@media_cdn_base := "https://cdn.yay.space/uploads"
+@random_chars := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+// アップロードされたファイルの公開 URL（レスポンスの URL は古い接頭辞のことがあるので、これを使う）
+media_url[@filename] (
+    if @filename == "" ( # "" )
+    # "@{@media_cdn_base}/@{str_trim_start[@filename]}"
+)
+
+// ---- カテゴリ（バケットのパスとサムネイルの大きさ） ----
+// {"path": ディレクトリ, "thumb": {幅, 高さ} か nil, "max": 一度に送れる枚数}
+
+category[@path, @thumb_w, @thumb_h, @max] (
+    @thumb := nil
+    if @thumb_w > 0 ( @thumb = {@thumb_w, @thumb_h} )
+    # {"path": @path, "thumb": @thumb, "max": @max}
+)
+
+// 日付のディレクトリ名（0 埋めなしの 年/月/日）。時差は `utc_offset_minutes`（既定は日本の 540）
+ymd[@c, @ts] (
+    @d := @time.date[@ts, map_get[@c, "utc_offset_minutes", 540]]
+    # "@{@d{"year"}}/@{@d{"month"}}/@{@d{"day"}}"
+)
+
+category_for[@c, @kind, @ids, @ts] (
+    @day := ymd[@c, @ts]
+    if @kind == "avatar" ( # category["user/@{@ids{0}}/avatar", 200, 200, @max_images] )
+    if @kind == "cover" ( # category["user/@{@ids{0}}/cover", 300, 150, @max_images] )
+    if @kind == "post" ( # category["user/@{@ids{0}}/posts/@{@day}", 450, 450, @max_images] )
+    if @kind == "chat_message" ( # category["chatroom/@{@ids{0}}/user/@{@ids{1}}/messages/@{@day}", 450, 450, @max_images] )
+    if @kind == "chat_background" ( # category["chatroom/@{@ids{0}}/background", 200, 200, @max_images] )
+    if @kind == "group_icon" ( # category["group/@{@ids{0}}/icon", 300, 300, @max_images] )
+    if @kind == "group_cover" ( # category["group/@{@ids{0}}/cover", 300, 300, @max_images] )
+    if @kind == "group_creation_icon" ( # category["group/create/icon/@{@day}", 300, 300, @max_images] )
+    if @kind == "group_creation_cover" ( # category["group/create/cover/@{@day}", 300, 300, @max_images] )
+    if @kind == "signup_avatar" ( # category["user/create/@{@day}", 200, 200, @max_images] )
+    if @kind == "thread_icon" ( # category["group/@{@ids{0}}/threads/@{@day}", 300, 300, @max_images] )
+    if @kind == "report" ( # category["report/@{@day}", 450, 450, @max_report_images] )
+    if @kind == "video_call_snapshot" ( # category["video_call_snapshot/@{@day}", 0, 0, @max_images] )
+    assert[false, "yaylib: 知らないアップロードの種類です: @{@kind}"]
+)
+
+// ---- 名前・種類 ----
+
+random_prefix[@n] (
+    @bytes := @crypto.random_bytes[@n]
+    @out := ""
+    for @i in range[0, @n] (
+        @k := @bytes{@i} % 62
+        @out = "@{@out}@{str_sub[@random_chars, @k, @k + 1]}"
+    )
+    # @out
+)
+
+// 拡張子の正規化: .png .gif .jpeg .jpg 以外（なしを含む）は .jpg
+normalize_ext[@filename] (
+    @ext := str_lower[@path.ext[@filename]]
+    if @ext == ".png" || @ext == ".gif" || @ext == ".jpeg" || @ext == ".jpg" ( # @ext )
+    # ".jpg"
+)
+
+content_type_for[@filename] (
+    @ext := str_lower[@path.ext[@filename]]
+    if @ext == ".png" ( # "image/png" )
+    if @ext == ".gif" ( # "image/gif" )
+    if @ext == ".mp4" ( # "video/mp4" )
+    # "image/jpeg"
+)
+
+// `<カテゴリ>/<ランダム16字>_<ミリ秒>_<番号>_size_<幅>x<高さ>.<拡張子>`
+image_filename[@dir, @prefix, @ms, @index, @ext, @w, @h] (
+    @size := ""
+    if @w > 0 && @h > 0 ( @size = "_size_@{@w}x@{@h}" )
+    @body := "@{@prefix}_@{@ms}_@{@index}@{@size}@{@ext}"
+    if @dir == "" ( # @body )
+    # "@{@dir}/@{@body}"
+)
+
+// サムネイルの名前。大きさは元の画像のもの（サムネイルの大きさではない）
+thumbnail_filename[@dir, @prefix, @ms, @index, @ext, @w, @h] (
+    @size := ""
+    if @w > 0 && @h > 0 ( @size = "_size_@{@w}x@{@h}" )
+    @body := "thumb_@{@prefix}_@{@ms}_@{@index}@{@size}@{@ext}"
+    if @dir == "" ( # @body )
+    # "@{@dir}/@{@body}"
+)
+
+video_filename[@prefix, @ms] (
+    # "@{@prefix}_@{@ms}.mp4"
+)
+
+// サムネイル: GIF は動きを保った GIF（もう収まっていれば元のまま）、それ以外は JPEG（品質 85）。
+// 戻り値は {"data": バイト列, "ext": 拡張子}。大きすぎる・読めないなどはエラー値
+make_thumbnail[@data, @source_ext, @w, @h, @orig_w, @orig_h] (
+    if @source_ext == ".gif" (
+        if @orig_w <= @w && @orig_h <= @h ( # {"data": @data, "ext": ".gif"} )
+        @out := @img.resize[@data, @w, @h, {"fit": "inside", "format": "gif"}]?
+        # {"data": @out, "ext": ".gif"}
+    )
+    @out := @img.resize[@data, @w, @h, {"fit": "inside", "format": "jpeg", "quality": 85}]?
+    # {"data": @out, "ext": ".jpeg"}
+)
+
+upload_error[@message, @data = nil] (
+    # err_new["upload", "yaylib: @{@message}", @data]
+)
+
+// 署名付き URL に生のバイト列を PUT する。成功したら nil
+put_presigned[@c, @url, @data, @content_type] (
+    @resp := @transport.send_bare[@c, {
+        "method": "PUT",
+        "url": @url,
+        "headers": {"Content-Type": @content_type},
+        "body": @data
+    }]
+    if is_error[@resp] ( # @resp )
+    if @resp{"status"} < 200 || @resp{"status"} > 299 (
+        @preview := str_trim[str_sub[@resp{"body"}, 0, min[512, str_len[@resp{"body"}]]]]
+        # upload_error["PUT @{@resp{"status"}}: @{@preview}", {"status": @resp{"status"}}]
+    )
+    # nil
+)
+
+// 画像をまとめてアップロードする。戻り値は、画像ごとのサーバー上の名前の配列
+upload_images[@c, @category, @files] (
+    assert[arr_len[@files] > 0, "yaylib: アップロードするファイルがありません"]
+    assert[arr_len[@files] <= @category{"max"}, "yaylib: 一度に送れるのは @{@category{"max"}} 枚までです（@{arr_len[@files]} 枚）"]
+    @ms := @util.now_ms[]
+    @prefix := random_prefix[16]
+    @dir := @category{"path"}
+    @mains := {}
+    @thumbs := {}
+    @index := 0
+    for @file in @files (
+        assert[type_of[map_get[@file, "data", nil]] == "bytes", "yaylib: ファイルの data はバイト列です（@{@index} 番目）"]
+        @data := @file{"data"}
+        @ext := normalize_ext[map_get[@file, "filename", ""]]
+        @info := @img.info[@data]
+        if is_error[@info] ( # upload_error["画像 @{@index} を読めません: @{err_message[@info]}"] )
+        @w := @info{"width"}
+        @h := @info{"height"}
+        @name := image_filename[@dir, @prefix, @ms, @index, @ext, @w, @h]
+        arr_push[@mains, {"data": @data, "filename": @name, "content_type": content_type_for[@name]}]
+        if @category{"thumb"} != nil (
+            @t := make_thumbnail[@data, @ext, @category{"thumb"}{0}, @category{"thumb"}{1}, @w, @h]
+            if is_error[@t] ( # upload_error["画像 @{@index} のサムネイルを作れません: @{err_message[@t]}"] )
+            @thumb_name := thumbnail_filename[@dir, @prefix, @ms, @index, @t{"ext"}, @w, @h]
+            arr_push[@thumbs, {"data": @t{"data"}, "filename": @thumb_name, "content_type": content_type_for[@thumb_name]}]
+        )
+        @index = @index + 1
+    )
+    @jobs := arr_concat[@mains, @thumbs]
+    @urls := @call.call[@c, "get_bucket_presigned_urls", {"file_names": arr_map[@jobs, [@j] ( # @j{"filename"} )]}]
+    if is_error[@urls] ( # upload_error["署名付き URL をもらえません: @{err_message[@urls]}", err_data[@urls]] )
+    @list := map_get[@urls, "presigned_urls", {}]
+    if arr_len[@list] != arr_len[@jobs] (
+        # upload_error["署名付き URL の数が合いません（@{arr_len[@jobs]} 個のところ @{arr_len[@list]} 個）"]
+    )
+    // 最初の失敗で止める
+    @i := 0
+    for @job in @jobs (
+        @url := map_get[@list{@i}, "url", ""]
+        if @url == "" ( # upload_error["@{@job{"filename"}}: 署名付き URL が空です"] )
+        @put := put_presigned[@c, @url, @job{"data"}, @job{"content_type"}]
+        if is_error[@put] ( # upload_error["@{@job{"filename"}} を送れません: @{err_message[@put]}", err_data[@put]] )
+        @i = @i + 1
+    )
+    // 返すのは本体の画像のサーバー上の名前（サムネイルは返さない）
+    @names := {}
+    for @k in range[0, arr_len[@files]] (
+        arr_push[@names, @list{@k}{"filename"}]
+    )
+    # @names
+)
+
+upload_one[@c, @kind, @ids, @file] (
+    @category := category_for[@c, @kind, @ids, @time.now[]]
+    @names := upload_images[@c, @category, {@file}]?
+    # @names{0}
+)
+
+upload_many[@c, @kind, @ids, @files] (
+    # upload_images[@c, category_for[@c, @kind, @ids, @time.now[]], @files]
+)
+
+// ユーザーに結びついたアップロードは、ログインが要る
+require_user_id[@c] (
+    if @c{"user_id"} == 0 ( # err_new["not_logged_in", "yaylib: ログインしていません（ユーザーに結びついたアップロードの前に login_with_email を呼んでください）"] )
+    # @c{"user_id"}
+)
+
+upload_avatar_image[@c, @file] (
+    @uid := require_user_id[@c]?
+    # upload_one[@c, "avatar", {@uid}, @file]
+)
+
+upload_cover_image[@c, @file] (
+    @uid := require_user_id[@c]?
+    # upload_one[@c, "cover", {@uid}, @file]
+)
+
+upload_post_images[@c, @files] (
+    @uid := require_user_id[@c]?
+    # upload_many[@c, "post", {@uid}, @files]
+)
+
+upload_chat_message_images[@c, @room_id, @files] (
+    @uid := require_user_id[@c]?
+    # upload_many[@c, "chat_message", {@room_id, @uid}, @files]
+)
+
+upload_chat_background_image[@c, @room_id, @file] (
+    # upload_one[@c, "chat_background", {@room_id}, @file]
+)
+
+upload_group_icon_image[@c, @group_id, @file] (
+    # upload_one[@c, "group_icon", {@group_id}, @file]
+)
+
+upload_group_cover_image[@c, @group_id, @file] (
+    # upload_one[@c, "group_cover", {@group_id}, @file]
+)
+
+upload_thread_icon_image[@c, @group_id, @file] (
+    # upload_one[@c, "thread_icon", {@group_id}, @file]
+)
+
+upload_signup_avatar_image[@c, @file] (
+    # upload_one[@c, "signup_avatar", {}, @file]
+)
+
+upload_group_creation_icon_image[@c, @file] (
+    # upload_one[@c, "group_creation_icon", {}, @file]
+)
+
+upload_group_creation_cover_image[@c, @file] (
+    # upload_one[@c, "group_creation_cover", {}, @file]
+)
+
+upload_report_images[@c, @files] (
+    # upload_many[@c, "report", {}, @files]
+)
+
+upload_video_call_snapshot_image[@c, @file] (
+    # upload_one[@c, "video_call_snapshot", {}, @file]
+)
+
+// 動画をアップロードする（mp4 のバイト列）。戻り値は、投稿に渡す動画のファイル名
+upload_video[@c, @data] (
+    assert[type_of[@data] == "bytes", "yaylib: 動画はバイト列で渡します"]
+    @name := video_filename[random_prefix[16], @util.now_ms[]]
+    @resp := @call.call[@c, "get_user_presigned_url", {"video_file_name": @name}]
+    if is_error[@resp] ( # upload_error["署名付き URL をもらえません: @{err_message[@resp]}", err_data[@resp]] )
+    @url := map_get[@resp, "presigned_url", ""]
+    if @url == "" ( # upload_error["署名付き URL が空です"] )
+    @put := put_presigned[@c, @url, @data, "video/mp4"]
+    if is_error[@put] ( # upload_error["動画を送れません: @{err_message[@put]}", err_data[@put]] )
+    # @name
+)

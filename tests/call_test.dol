@@ -1,0 +1,139 @@
+// オペレーションの呼び出しのテスト
+@call := import["../src/call.dol"]
+@client := import["../src/client.dol"]
+
+fake[@script] (
+    @sent := {}
+    @state := {"i": 0}
+    # {"sent": @sent, "send": [@req] (
+        arr_push[@sent, @req]
+        @i := @state{"i"}
+        @state{"i"} = @i + 1
+        if @i < arr_len[@script] ( # @script{@i} )
+        # {"status": 200, "ok": true, "headers": {:}, "body": "{}"}
+    )}
+)
+
+reply[@status, @body] (
+    # {"status": @status, "ok": @status >= 200 && @status < 300, "headers": {:}, "body": @body}
+)
+
+make_client[@f] (
+    # @client.new_client[{"send": @f{"send"}, "sleep": [@s] ( # nil ), "device_uuid": "dev-1", "client_ip": "1.2.3.4"}]
+)
+
+test_all_operations_are_in_the_table[] (
+    @ops := @call.operations[]
+    assert[map_len[@ops] > 200]
+    for @name in {"get_timeline", "create_post", "login_with_email", "get_bucket_presigned_urls", "get_web_socket_token", "oauth_token"} (
+        assert[map_has[@ops, @name], @name]
+    )
+)
+
+test_path_and_query[] (
+    @f := fake[{reply[200, "{\"posts\": {}}"]}]
+    @c := make_client[@f]
+    @r := @call.call[@c, "get_timeline", {"noreply_mode": "noreply_", "number": 20, "reduce_selfie": true, "from_post_id": 123}]
+    assert_eq[@r, {"posts": {:}}]
+    @req := @f{"sent"}{0}
+    assert_eq[@req{"method"}, "GET"]
+    // 数値は整数のまま、真偽値は true / false。キーの昇順
+    assert_eq[@req{"url"}, "https://api.yay.space/v2/posts/noreply_timeline?from_post_id=123&number=20&reduce_selfie=true"]
+)
+
+test_array_query_keeps_brackets[] (
+    @f := fake[{}]
+    @c := make_client[@f]
+    @call.call[@c, "get_bucket_presigned_urls", {"file_names": {"a/b.png", "c d.jpg"}}]
+    assert_eq[@f{"sent"}{0}{"url"}, "https://api.yay.space/v1/buckets/presigned_urls?file_names[]=a%2Fb.png&file_names[]=c+d.jpg"]
+)
+
+test_json_body[] (
+    @f := fake[{}]
+    @c := make_client[@f]
+    @call.call[@c, "login_with_email", {"body": {"email": "a\@b", "password": "p"}}]
+    @req := @f{"sent"}{0}
+    assert_eq[bytes_to_str[@req{"body"}], "{\"email\":\"a\@b\",\"password\":\"p\"}"]
+    assert_eq[@req{"headers"}{"Content-Type"}, "application/json;charset=UTF-8"]
+    assert_eq[@req{"headers"}{"Accept"}, "application/json"]
+)
+
+test_multipart_form_and_auto_x_jwt[] (
+    @f := fake[{}]
+    @c := make_client[@f]
+    @call.call[@c, "create_post", {"text": "こんにちは", "post_type": "text", "choices": {"a", "b"}, "mention_ids": {1, 2}}]
+    @req := @f{"sent"}{0}
+    @ct := @req{"headers"}{"Content-Type"}
+    assert[str_starts_with[@ct, "multipart/form-data; boundary="]]
+    @boundary := str_sub[@ct, 30, str_len[@ct]]
+    @body := bytes_to_str[@req{"body"}]
+    assert[str_starts_with[@body, "--@{@boundary}\r\n"]]
+    assert[str_ends_with[@body, "--@{@boundary}--\r\n"]]
+    assert[str_contains[@body, "name=\"text\"\r\n\r\nこんにちは\r\n"]]
+    // 配列は csv でつなぐ（`choices[]` と `mention_ids[]`）
+    assert[str_contains[@body, "name=\"choices[]\"\r\n\r\na,b\r\n"]]
+    assert[str_contains[@body, "name=\"mention_ids[]\"\r\n\r\n1,2\r\n"]]
+    // X-Jwt は渡さなければ作る
+    assert_eq[arr_len[str_split[@req{"headers"}{"X-Jwt"}, "."]], 3]
+    assert_eq[@req{"url"}, "https://api.yay.space/v3/posts/new"]
+)
+
+test_given_x_jwt_is_kept[] (
+    @f := fake[{}]
+    @c := make_client[@f]
+    @call.call[@c, "create_post", {"text": "x", "x_jwt": "mine"}]
+    assert_eq[@f{"sent"}{0}{"headers"}{"X-Jwt"}, "mine"]
+)
+
+test_urlencoded_form[] (
+    @f := fake[{}]
+    @c := make_client[@f]
+    @call.call[@c, "oauth_token", {"grant_type": "refresh_token", "refresh_token": "r t"}]
+    assert_eq[bytes_to_str[@f{"sent"}{0}{"body"}], "grant_type=refresh_token&refresh_token=r+t"]
+)
+
+test_errors_become_api_error_values[] (
+    @f := fake[{reply[400, "{\"error_code\": -1, \"message\": \"だめ\", \"retry_in\": 3}"]}]
+    @c := make_client[@f]
+    @r := @call.call[@c, "get_user_timestamp", {:}]
+    assert[is_error[@r]]
+    assert_eq[err_kind[@r], "api"]
+    assert_eq[err_message[@r], "だめ"]
+    @d := err_data[@r]
+    assert_eq[@d{"status"}, 400]
+    assert_eq[@d{"error_code"}, -1]
+    assert_eq[@d{"retry_in"}, 3]
+)
+
+test_error_without_json_body[] (
+    @f := fake[{reply[404, "<html>nope</html>"]}]
+    @c := make_client[@f]
+    @r := @call.call[@c, "get_user_timestamp"]
+    assert_eq[err_message[@r], "HTTP 404"]
+    assert_eq[err_data[@r]{"error_code"}, 0]
+)
+
+test_bad_json_in_2xx_is_a_decode_error[] (
+    @f := fake[{reply[200, "not json"]}]
+    @c := make_client[@f]
+    @r := @call.call[@c, "get_user_timestamp"]
+    assert_eq[err_kind[@r], "decode"]
+    assert_eq[err_data[@r]{"body"}, "not json"]
+    // `execute_raw` は本文を読まないので、同じ応答でも成功する
+    @f2 := fake[{reply[200, "not json"]}]
+    @c2 := make_client[@f2]
+    assert_eq[@call.execute_raw[@c2, "get_user_timestamp"]{"body"}, "not json"]
+)
+
+test_empty_2xx_body_is_nil[] (
+    @f := fake[{reply[204, ""]}]
+    @c := make_client[@f]
+    assert_eq[@call.call[@c, "get_user_timestamp"], nil]
+)
+
+test_network_error_is_returned[] (
+    @f := fake[{err_new["network", "x"], err_new["network", "x"], err_new["network", "x"]}]
+    @c := make_client[@f]
+    @r := @call.call[@c, "get_user_timestamp"]
+    assert_eq[err_kind[@r], "network"]
+)

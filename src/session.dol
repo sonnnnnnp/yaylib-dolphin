@@ -1,0 +1,77 @@
+// セッションの保存（PORTING.md 5 章）
+//
+// ストアは `{"load": [email], "save": [session], "delete": [email]}` の形のマップ。
+//   load  : セッション（マップ）。なければ nil。読めなければエラー値
+//   save  : 上書き保存（nil か、エラー値）
+//   delete: 消す（なくても成功）
+// セッションは {"email", "user_id", "access_token", "refresh_token", "device_uuid", "updated_at", "oauth_key"?}
+
+@time := import["std:time"]
+@json := import["std:json"]
+@path := import["std:path"]
+
+// メモリ上のストア（テスト用）
+memory_session_store[] (
+    @sessions := {:}
+    # {
+        "load": [@email] ( # map_get[@sessions, @email, nil] ),
+        "save": [@session] (
+            @sessions{@session{"email"}} = @session
+            # nil
+        ),
+        "delete": [@email] (
+            if map_has[@sessions, @email] ( map_remove[@sessions, @email] )
+            # nil
+        )
+    }
+)
+
+// JSON ファイルのストア。{"sessions": {メールアドレス: セッション}}。書き込みは一時ファイルに書いてから置き換える
+file_session_store[@file] (
+    # {
+        "load": [@email] ( # file_load[@file, @email] ),
+        "save": [@session] ( # file_save[@file, @session] ),
+        "delete": [@email] ( # file_delete[@file, @email] )
+    }
+)
+
+read_all[@file] (
+    if !file_exists[@file] ( # {"sessions": {:}} )
+    @text := file_read[@file]?
+    @doc := @json.parse[@text]?
+    if type_of[@doc] != "map" || !map_has[@doc, "sessions"] || type_of[@doc{"sessions"}] != "map" (
+        # err_new["session", "セッションのファイルの形式が正しくありません"]
+    )
+    # @doc
+)
+
+write_all[@file, @doc] (
+    @dir := @path.dirname[@file]
+    if @dir != "" ( file_mkdir[@dir]? )
+    @temp := "@{@file}.tmp"
+    file_write[@temp, @json.pretty[@doc]]?
+    file_rename[@temp, @file]?
+    # nil
+)
+
+file_load[@file, @email] (
+    @doc := read_all[@file]?
+    # map_get[@doc{"sessions"}, @email, nil]
+)
+
+file_save[@file, @session] (
+    @doc := read_all[@file]?
+    @record := map_copy[@session]
+    @record{"updated_at"} = @time.iso[@time.now[]]
+    @doc{"sessions"}{@session{"email"}} = @record
+    # write_all[@file, @doc]
+)
+
+file_delete[@file, @email] (
+    @doc := read_all[@file]?
+    if map_has[@doc{"sessions"}, @email] (
+        map_remove[@doc{"sessions"}, @email]
+        # write_all[@file, @doc]
+    )
+    # nil
+)

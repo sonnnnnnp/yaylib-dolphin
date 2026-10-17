@@ -1,0 +1,79 @@
+// クライアントの作成と設定（PORTING.md 3・4 章）
+//
+// クライアントは 1 つのマップ（参照渡しなので、関数に渡しても同じものを指す）。
+// 設定のキーは Go 版の `WithXxx` と同じ名前を snake_case にしたもの。
+
+@signing := import["./signing.dol"]
+@transport := import["./transport.dol"]
+
+// 既定の設定。api_key などは Go 版（ekkx/yaylib）の Default* と同じ
+defaults[] (
+    # {
+        "base_url": "https://api.yay.space",
+        "cassandra_base_url": "https://cas.yay.space",
+        "event_stream_url": "wss://cable.yay.space",
+        "api_key": "ccd59ee269c01511ba763467045c115779fcae3050238a252f1bd1a4b65cfec6",
+        "web_api_key": "e9f1ae4c4470f29a92c0168dc42b13637cc332692103f23e626bc2b016f66603",
+        "api_version_key": "34c8c1cdf29b46a492e8ec58e6db37ec",
+        "api_version_name": "4.26",
+        "app_version": "4.26.1",
+        "device_type": "android",
+        "device_os": "11",
+        "device_density": "3.5",
+        "device_screen": "1440x2960",
+        "device_model": "Galaxy S9",
+        "connection_type": "wifi",
+        "connection_speed": "0 kbps",
+        "accept_language": "ja",
+        "http_timeout": 90,
+        "retry": {"max_attempts": 3, "base_delay": 0.2, "max_delay": 30, "retry_on_post": false}
+    }
+)
+
+// クライアントを作る。`options` は上の設定の上書きに、次のキーが使える:
+//   device_uuid, user_id, client_ip, user_agent, device_info（なければ組み立てる）
+//   session_store（session.dol のストア）, logger（[level, event, fields] を呼ぶ関数）
+//   send（通信の関数。テスト用）, sleep（待つ関数。テスト用）
+// 何も渡さなくても動く
+new_client[@options = {:}] (
+    @c := map_merge[defaults[], @options]
+    @c{"retry"} = map_merge[defaults[]{"retry"}, map_get[@options, "retry", {:}]]
+    if !map_has[@c, "device_uuid"] ( @c{"device_uuid"} = @signing.new_uuid[] )
+    if !map_has[@c, "user_agent"] (
+        @c{"user_agent"} = str_concat[@c{"device_type"}, " ", @c{"device_os"}, " (", @c{"device_density"}, "x ", @c{"device_screen"}, " ", @c{"device_model"}, ")"]
+    )
+    if !map_has[@c, "device_info"] (
+        @c{"device_info"} = str_concat["yay ", @c{"app_version"}, " ", @c{"user_agent"}]
+    )
+    for @pair in {
+        {"user_id", 0}, {"client_ip", ""}, {"session_store", nil}, {"logger", nil},
+        {"send", @transport.default_send}, {"sleep", @transport.default_sleep}
+    } (
+        if !map_has[@c, @pair{0}] ( @c{@pair{0}} = @pair{1} )
+    )
+    // 状態（ログインで決まるもの）
+    @c{"access_token"} = ""
+    @c{"refresh_token"} = ""
+    @c{"email"} = ""
+    @c{"oauth_key"} = @c{"api_key"}
+    @c{"client_ip_fetching"} = false
+    # @c
+)
+
+// トークンを設定する（ログインや更新の結果、またはどこかに保存してあったもの）
+set_tokens[@c, @access, @refresh] (
+    @c{"access_token"} = @access
+    @c{"refresh_token"} = @refresh
+    # nil
+)
+
+// 今のトークンの写し（書き換えてもクライアントには影響しない）
+tokens[@c] (
+    # {"access": @c{"access_token"}, "refresh": @c{"refresh_token"}}
+)
+
+// 認証なしでトークンから始めるとき、ユーザー ID も設定する
+set_user_id[@c, @user_id] (
+    @c{"user_id"} = @user_id
+    # nil
+)

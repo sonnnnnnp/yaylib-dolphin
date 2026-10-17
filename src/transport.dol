@@ -1,0 +1,282 @@
+// 通信（PORTING.md 7・13・14・16 章）
+//
+// リクエストは {"method", "path", "query": 文字列, "headers": マップ, "body": バイト列か nil}。
+// 戻り値は std:http と同じ {"status", "ok", "headers", "body"}（本文は文字列）か、通信の失敗のエラー値。
+// 実際の送信は `client{"send"}`（既定は std:http）に渡す。そのリクエストは
+// {"method", "url", "headers", "body", "timeout"}。
+
+@json := import["std:json"]
+@http := import["std:http"]
+@time := import["std:time"]
+@enc := import["std:encoding"]
+@util := import["./util.dol"]
+@routes := import["./host_routes.dol"]
+@errors := import["./errors.dol"]
+
+@host_table := @routes.host_routes[]
+
+// ---- 送信（差し替えられる） ----
+
+default_send[@req] (
+    @options := {
+        "method": @req{"method"},
+        "url": @req{"url"},
+        "headers": @req{"headers"},
+        "timeout": @req{"timeout"}
+    }
+    if @req{"body"} != nil ( @options{"body"} = @req{"body"} )
+    # @http.request[@options]
+)
+
+default_sleep[@seconds] (
+    @time.sleep[@seconds]
+    # nil
+)
+
+log_event[@c, @level, @event, @fields] (
+    @logger := @c{"logger"}
+    if @logger != nil ( @logger[@level, @event, @fields] )
+    # nil
+)
+
+// ---- パス・ホスト ----
+
+is_oauth_path[@path] (
+    # str_contains[@path, "/api/v1/oauth/token"]
+)
+
+is_timestamp_path[@path] (
+    # str_ends_with[@path, "/v2/users/timestamp"]
+)
+
+// 別のホストで受けるオペレーションなら、そのホストの URL
+base_url_for[@c, @method, @path] (
+    @alias := map_get[@host_table, str_concat[@method, " ", @path], nil]
+    if @alias == "cassandra" && @c{"cassandra_base_url"} != "" (
+        log_event[@c, "debug", "host_route_rewrite", {"op": "@{@method} @{@path}", "host": @c{"cassandra_base_url"}}]
+        # @c{"cassandra_base_url"}
+    )
+    # @c{"base_url"}
+)
+
+// ---- ヘッダー ----
+
+// アプリが必ず付けるヘッダーを足す。呼ぶ側が指定したものが優先（X-Timestamp と JSON の Content-Type は除く）
+build_headers[@c, @given, @path, @access] (
+    @h := map_copy[@given]
+    @util.header_set_if_absent[@h, "User-Agent", @c{"user_agent"}]
+    @util.header_set_if_absent[@h, "X-App-Version", @c{"api_version_name"}]
+    @util.header_set_if_absent[@h, "X-Device-Info", @c{"device_info"}]
+    @util.header_set_if_absent[@h, "X-Device-UUID", @c{"device_uuid"}]
+    if @c{"client_ip"} != "" ( @util.header_set_if_absent[@h, "X-Client-IP", @c{"client_ip"}] )
+    @util.header_set_if_absent[@h, "X-Connection-Type", @c{"connection_type"}]
+    @util.header_set_if_absent[@h, "X-Connection-Speed", @c{"connection_speed"}]
+    @util.header_set_if_absent[@h, "Accept-Language", @c{"accept_language"}]
+    // 時刻は毎回新しく
+    @util.header_set[@h, "X-Timestamp", to_str[floor[@time.now[]]]]
+    // JSON の Content-Type は、サーバーが期待する書き方にそろえる
+    @ct := @util.header_get[@h, "Content-Type"]
+    if @ct != nil && str_starts_with[@ct, "application/json"] (
+        @util.header_set[@h, "Content-Type", "application/json;charset=UTF-8"]
+    )
+    if @util.header_get[@h, "Authorization"] == nil (
+        if is_oauth_path[@path] (
+            @util.header_set[@h, "Authorization", "Basic @{@enc.base64_encode[@c{"oauth_key"}]}"]
+        ) else (
+            if @access != "" ( @util.header_set[@h, "Authorization", "Bearer @{@access}"] )
+        )
+    )
+    # @h
+)
+
+// ---- 再試行 ----
+
+can_retry_method[@method, @policy] (
+    if @method == "GET" || @method == "HEAD" || @method == "PUT" || @method == "DELETE" || @method == "OPTIONS" ( # true )
+    if @method == "POST" || @method == "PATCH" ( # @policy{"retry_on_post"} )
+    # false
+)
+
+// 応答（またはエラー値）を見て、もう一度送るか
+should_retry[@resp, @method, @policy] (
+    if !is_error[@resp] && @resp{"status"} == 429 ( # true )
+    if !can_retry_method[@method, @policy] ( # false )
+    if is_error[@resp] ( # err_kind[@resp] == "network" || err_kind[@resp] == "timeout" )
+    if @resp{"status"} == 401 ( # false )
+    # @resp{"status"} >= 500 && @resp{"status"} <= 599
+)
+
+// 本文の `retry_in`（秒）。なければ 0
+retry_in_of[@resp] (
+    if is_error[@resp] || @resp == nil || @resp{"status"} < 400 ( # 0 )
+    @parsed := @json.parse[@resp{"body"}]
+    if is_error[@parsed] || type_of[@parsed] != "map" ( # 0 )
+    @n := map_get[@parsed, "retry_in", 0]
+    if type_of[@n] == "number" && @n > 0 ( # @n )
+    # 0
+)
+
+// 次に待つ秒数（指数的に増やし、0 から上限までの乱数にする）
+next_delay[@prev, @attempt, @policy] (
+    @hint := retry_in_of[@prev]
+    if @hint > 0 (
+        if @policy{"max_delay"} > 0 && @hint > @policy{"max_delay"} ( # @policy{"max_delay"} )
+        # @hint
+    )
+    if @policy{"base_delay"} <= 0 ( # 0 )
+    @exp := @policy{"base_delay"} * pow[2, @attempt - 2]
+    if @exp > @policy{"max_delay"} ( @exp = @policy{"max_delay"} )
+    if @exp <= 0 ( # 0 )
+    # random[] * @exp
+)
+
+// ---- 送信 ----
+
+url_of[@base, @req] (
+    @url := "@{@base}@{@req{"path"}}"
+    if map_has[@req, "query"] && @req{"query"} != "" ( @url = "@{@url}?@{@req{"query"}}" )
+    # @url
+)
+
+// 1 回送る。ヘッダーを付け、401 ならトークンを更新して 1 度だけ送り直す
+attempt_once[@c, @req, @base] (
+    @sent_access := @c{"access_token"}
+    @headers := build_headers[@c, @req{"headers"}, @req{"path"}, @sent_access]
+    log_event[@c, "debug", "http_request", {"method": @req{"method"}, "path": @req{"path"}, "host": @base}]
+    @raw := {
+        "method": @req{"method"},
+        "url": url_of[@base, @req],
+        "headers": @headers,
+        "body": @req{"body"},
+        "timeout": @c{"http_timeout"}
+    }
+    @resp := @c{"send"}[@raw]
+    if is_error[@resp] ( # @resp )
+    if !is_timestamp_path[@req{"path"}] ( maybe_fetch_client_ip[@c] )
+    if @resp{"status"} == 401 && !is_oauth_path[@req{"path"}] (
+        # handle_401[@c, @req, @base, @resp, @sent_access]
+    )
+    # @resp
+)
+
+// 401: 更新トークンがなければ、そのまま返す。更新できなければ元の 401 を返す。
+// 更新できて、送り直しが通信の失敗に終わったら、その失敗を返す
+handle_401[@c, @req, @base, @orig, @stale] (
+    if @c{"refresh_token"} == "" ( # @orig )
+    @refreshed := refresh_tokens[@c, @stale]
+    if is_error[@refreshed] ( # @orig )
+    // 送り直しは再試行の外側で 1 回だけ（Authorization は新しいトークンで作り直す）
+    @given := map_copy[@req{"headers"}]
+    for @key in map_keys[@given] (
+        if str_lower[@key] == "authorization" ( map_remove[@given, @key] )
+    )
+    @raw := {
+        "method": @req{"method"},
+        "url": url_of[@base, @req],
+        "headers": build_headers[@c, @given, @req{"path"}, @c{"access_token"}],
+        "body": @req{"body"},
+        "timeout": @c{"http_timeout"}
+    }
+    # @c{"send"}[@raw]
+)
+
+// 更新トークンで新しいトークンの組をもらう。成功すれば nil、失敗すればエラー値。
+// 古いトークン `stale` がもう更新済みなら、何もしない
+refresh_tokens[@c, @stale] (
+    if @c{"access_token"} != @stale ( # nil )
+    @refresh := @c{"refresh_token"}
+    if @refresh == "" (
+        log_event[@c, "debug", "token_refresh", {"outcome": "no_token"}]
+        # nil
+    )
+    @pairs := {{"grant_type", "refresh_token"}, {"refresh_token", @refresh}}
+    @resp := send_request[@c, {
+        "method": "POST",
+        "path": "/api/v1/oauth/token",
+        "query": "",
+        "headers": {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        "body": str_to_bytes[@util.encode_pairs[@pairs]]
+    }]
+    if is_error[@resp] (
+        log_event[@c, "debug", "token_refresh", {"outcome": "failed"}]
+        # @resp
+    )
+    if @resp{"status"} < 200 || @resp{"status"} > 299 (
+        log_event[@c, "debug", "token_refresh", {"outcome": "failed"}]
+        # @errors.api_error[@resp{"status"}, @resp{"headers"}, @resp{"body"}]
+    )
+    @body := @json.parse[@resp{"body"}]
+    if is_error[@body] || type_of[@body] != "map" || type_of[map_get[@body, "access_token", nil]] != "string" (
+        log_event[@c, "debug", "token_refresh", {"outcome": "failed"}]
+        # err_new["decode", "トークンの応答を読めません", {"status": @resp{"status"}, "body": @resp{"body"}}]
+    )
+    @c{"access_token"} = @body{"access_token"}
+    @c{"refresh_token"} = map_get[@body, "refresh_token", ""]
+    log_event[@c, "debug", "token_refresh", {"outcome": "ok"}]
+    // セッションを保存する。失敗しても、更新したトークンは使えるので続ける
+    @store := @c{"session_store"}
+    if @store != nil && @c{"email"} != "" (
+        @saved := @store{"save"}[{
+            "email": @c{"email"},
+            "user_id": map_get[@body, "id", @c{"user_id"}],
+            "access_token": @c{"access_token"},
+            "refresh_token": @c{"refresh_token"},
+            "device_uuid": @c{"device_uuid"},
+            "oauth_key": @c{"oauth_key"}
+        }]
+        if is_error[@saved] (
+            log_event[@c, "warn", "token_persist_fail", {"user_id": map_get[@body, "id", @c{"user_id"}]}]
+        )
+    )
+    # nil
+)
+
+// 最初のリクエストのあと、サーバーが見た自分の IP を一度だけ調べて、X-Client-IP に使う
+maybe_fetch_client_ip[@c] (
+    if @c{"client_ip"} != "" || @c{"client_ip_fetching"} ( # nil )
+    @c{"client_ip_fetching"} = true
+    @resp := send_request[@c, {
+        "method": "GET",
+        "path": "/v2/users/timestamp",
+        "query": "",
+        "headers": {"Accept": "application/json"},
+        "body": nil
+    }]
+    @c{"client_ip_fetching"} = false
+    if is_error[@resp] || @resp{"status"} < 200 || @resp{"status"} > 299 ( # nil )
+    @body := @json.parse[@resp{"body"}]
+    if !is_error[@body] && type_of[@body] == "map" (
+        @ip := map_get[@body, "ip_address", nil]
+        if type_of[@ip] == "string" && @ip != "" ( @c{"client_ip"} = @ip )
+    )
+    # nil
+)
+
+// アプリのヘッダー・ホストの振り分け・再試行・401 の更新をすべて行って送る
+send_request[@c, @req] (
+    @base := base_url_for[@c, @req{"method"}, @req{"path"}]
+    @policy := @c{"retry"}
+    @max := max[@policy{"max_attempts"}, 1]
+    @attempt := 1
+    @resp := nil
+    while true (
+        @resp = attempt_once[@c, @req, @base]
+        if @attempt >= @max || !should_retry[@resp, @req{"method"}, @policy] ( # @resp )
+        @attempt = @attempt + 1
+        @wait := next_delay[@resp, @attempt, @policy]
+        log_event[@c, "debug", "http_retry", {"method": @req{"method"}, "path": @req{"path"}, "attempt": @attempt, "delay_ms": floor[@wait * 1000]}]
+        @c{"sleep"}[@wait]
+    )
+)
+
+// アプリのヘッダーも再試行も付けずに送る（ブラウザ版のログインや、署名付き URL への PUT）。
+// `req` は {"method", "url", "headers", "body"}
+send_bare[@c, @req] (
+    # @c{"send"}[{
+        "method": @req{"method"},
+        "url": @req{"url"},
+        "headers": @req{"headers"},
+        "body": map_get[@req, "body", nil],
+        "timeout": @c{"http_timeout"}
+    }]
+)

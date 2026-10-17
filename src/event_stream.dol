@@ -1,0 +1,296 @@
+// イベントストリーム（PORTING.md 11 章）。ActionCable 形式の WebSocket
+//
+//   @s := yaylib.open_event_stream[@c, {"on_error": [@e] ( … )}]
+//   @sub := yaylib.subscribe[@s, yaylib.chat_room_channel[], {"on_event": [@ev] ( … )}]
+//   async.run[]                          // イベントループを動かす（コールバックはここで呼ばれる）
+//
+// イベントは {"type": "NewMessageEvent", "name": "new_message", "data": …}。知らないイベントは
+// "type": "RawEvent" のまま届く。接続が切れたら、自動で作り直して、購読をやり直す。
+
+@json := import["std:json"]
+@enc := import["std:encoding"]
+@ws := import["std:ws"]
+@async := import["std:async"]
+@time := import["std:time"]
+@call := import["./call.dol"]
+@transport := import["./transport.dol"]
+
+// 再接続が成功してから、これだけ(秒)続いたら、失敗の回数を数え直す
+@stable_after := 30
+// 購読の確認(confirm_subscription)を待つ秒数
+@confirm_timeout := 10
+
+// ---- チャンネル（identifier は JSON の文字列そのもの。形が決まっている） ----
+
+chat_room_channel[] (
+    # "{\"channel\":\"ChatRoomChannel\"}"
+)
+
+messages_channel[@chat_room_id] (
+    # "{\"channel\":\"MessagesChannel\",\"chat_room_id\":\"@{@chat_room_id}\"}"
+)
+
+group_updates_channel[] (
+    # "{\"channel\":\"GroupUpdatesChannel\"}"
+)
+
+group_posts_channel[@group_id] (
+    # "{\"channel\":\"GroupPostsChannel\",\"group_id\":\"@{@group_id}\"}"
+)
+
+// ---- イベントの種類 ----
+
+event_type_of[@name] (
+    @types := {
+        "new_message": "NewMessageEvent",
+        "video_processed": "VideoProcessedEvent",
+        "chat_deleted": "ChatDeletedEvent",
+        "total_chat_request": "TotalChatRequestEvent",
+        "unsubscribed": "UnsubscribedEvent",
+        "new_post": "GroupUpdatedEvent",
+        "conference_call_finished": "CallFinishedEvent"
+    }
+    # map_get[@types, @name, "RawEvent"]
+)
+
+// 通信まわり（テストで差し替えられる）
+real_io[] (
+    # {
+        "connect": @ws.connect_async,
+        "send": @ws.send,
+        "close": @ws.close,
+        "after": @async.after,
+        "cancel": @async.cancel,
+        "now": @time.now
+    }
+)
+
+// ---- ストリーム ----
+
+// ストリームを開く。接続はイベントループの上で始まる。
+// `options`: reconnect（{"disabled", "max_attempts"（0 は無制限）, "initial_delay", "max_delay"}）、
+//   on_open[]（welcome を受けたとき。再接続のときも）、on_error[error]（これ以上つながらないとき。最後）、
+//   on_reconnect[attempt, delay]、io（通信の関数。テスト用）
+open_event_stream[@c, @options = {:}] (
+    @reconnect := map_merge[{"disabled": false, "max_attempts": 0, "initial_delay": 0.5, "max_delay": 30}, map_get[@options, "reconnect", {:}]]
+    @stream := {
+        "client": @c,
+        "options": @options,
+        "reconnect": @reconnect,
+        "io": map_get[@options, "io", real_io[]],
+        "subs": {:},
+        "conn": nil,
+        "ready": false,
+        "closed": false,
+        "attempt": 0,
+        "connected_at": 0,
+        "connection_id": 0,
+        "timer_id": nil
+    }
+    connect_stream[@stream]
+    # @stream
+)
+
+emit[@stream, @name, @args] (
+    @handler := map_get[@stream{"options"}, @name, nil]
+    if @handler != nil ( @handler[...@args] )
+    # nil
+)
+
+// 1 回つなぐ（トークンをもらって、WebSocket を開く）
+connect_stream[@stream] (
+    if @stream{"closed"} ( # nil )
+    @c := @stream{"client"}
+    @token := @call.call[@c, "get_web_socket_token"]
+    if is_error[@token] || type_of[map_get[@token, "token", nil]] != "string" (
+        // トークンをもらえなかった。つなぎ直しの回数に数える
+        lost[@stream, if is_error[@token] ( err_message[@token] ) else ( "WebSocket のトークンを読めません" )]
+        # nil
+    )
+    @url := "@{@c{"event_stream_url"}}?token=@{@enc.url_encode[@token{"token"}]}&app_version=@{@enc.url_encode[@c{"api_version_name"}]}"
+    // 接続が古いものか見分けるための番号
+    @stream{"connection_id"} = map_get[@stream, "connection_id", 0] + 1
+    @mine := @stream{"connection_id"}
+    @stream{"io"}{"connect"}[@url, {"timeout": 30}, {
+        "on_open": [@conn] (
+            if @mine == @stream{"connection_id"} ( @stream{"conn"} = @conn )
+        ),
+        "on_message": [@conn, @message] (
+            if @mine == @stream{"connection_id"} ( on_frame[@stream, @message] )
+        ),
+        "on_close": [@conn, @code, @reason] (
+            if @mine == @stream{"connection_id"} ( lost[@stream, "接続が閉じました（@{@code} @{@reason}）"] )
+        ),
+        "on_error": [@e] (
+            if @mine == @stream{"connection_id"} ( lost[@stream, err_message[@e]] )
+        )
+    }]
+    # nil
+)
+
+// 接続が切れた・つながらなかった。つなぎ直しを予約するか、あきらめる
+lost[@stream, @reason] (
+    @was_ready := @stream{"ready"}
+    @stream{"ready"} = false
+    @stream{"conn"} = nil
+    if @stream{"closed"} ( # nil )
+    // しばらく続いた接続だったら、失敗の数を数え直す
+    if @was_ready && @stream{"io"}{"now"}[] - @stream{"connected_at"} >= @stable_after ( @stream{"attempt"} = 0 )
+    @stream{"attempt"} = @stream{"attempt"} + 1
+    @policy := @stream{"reconnect"}
+    if @policy{"disabled"} || (@policy{"max_attempts"} > 0 && @stream{"attempt"} > @policy{"max_attempts"}) (
+        finish[@stream, err_new["event_stream", "イベントストリームがつながりません: @{@reason}"]]
+        # nil
+    )
+    @delay := min[@policy{"initial_delay"} * pow[2, @stream{"attempt"} - 1], @policy{"max_delay"}]
+    @transport.log_event[@stream{"client"}, "debug", "ws_reconnect", {"attempt": @stream{"attempt"}, "delay_ms": floor[@delay * 1000]}]
+    emit[@stream, "on_reconnect", {@stream{"attempt"}, @delay}]
+    @stream{"timer_id"} = @stream{"io"}{"after"}[@delay, [] ( connect_stream[@stream] )]
+    # nil
+)
+
+// ストリームを終える。すべての購読にその理由を伝える
+finish[@stream, @error] (
+    @stream{"closed"} = true
+    @subs := @stream{"subs"}
+    @stream{"subs"} = {:}
+    for @sub in map_values[@subs] (
+        terminate_sub[@sub, @error]
+    )
+    emit[@stream, "on_error", {@error}]
+    # nil
+)
+
+// 利用者が閉じる。コールバックは呼ばない（購読の on_closed には nil が渡る）
+close_event_stream[@stream] (
+    if @stream{"closed"} ( # nil )
+    @stream{"closed"} = true
+    if @stream{"timer_id"} != nil ( @stream{"io"}{"cancel"}[@stream{"timer_id"}] )
+    if @stream{"conn"} != nil ( @stream{"io"}{"close"}[@stream{"conn"}] )
+    @stream{"conn"} = nil
+    @stream{"ready"} = false
+    @subs := @stream{"subs"}
+    @stream{"subs"} = {:}
+    for @sub in map_values[@subs] (
+        terminate_sub[@sub, nil]
+    )
+    # nil
+)
+
+// ---- フレーム ----
+
+command[@stream, @name, @identifier] (
+    if @stream{"conn"} == nil ( # nil )
+    @text := @json.stringify[{"command": @name, "identifier": @identifier}]
+    @stream{"io"}{"send"}[@stream{"conn"}, @text]
+    # nil
+)
+
+on_frame[@stream, @message] (
+    if type_of[@message] != "string" ( # nil )
+    @frame := @json.parse[@message]
+    if is_error[@frame] || type_of[@frame] != "map" ( # nil )
+    @type := map_get[@frame, "type", ""]
+    if @type == "welcome" (
+        if !@stream{"ready"} (
+            @stream{"ready"} = true
+            @stream{"connected_at"} = @stream{"io"}{"now"}[]
+            // つなぎ直したあとは、持っている購読をすべてやり直す
+            for @sub in map_values[@stream{"subs"}] (
+                send_subscribe[@stream, @sub]
+            )
+            emit[@stream, "on_open", {}]
+        )
+        # nil
+    )
+    if @type == "ping" ( # nil )
+    if @type == "disconnect" (
+        // サーバーからの切断。閉じて、つなぎ直す
+        if @stream{"conn"} != nil ( @stream{"io"}{"close"}[@stream{"conn"}] )
+        # nil
+    )
+    @ident := map_get[@frame, "identifier", ""]
+    @sub := map_get[@stream{"subs"}, @ident, nil]
+    if @type == "confirm_subscription" (
+        if @sub != nil (
+            cancel_confirm[@stream, @sub]
+            @sub{"confirmed"} = true
+            @handler := map_get[@sub{"handlers"}, "on_confirm", nil]
+            if @handler != nil ( @handler[] )
+        )
+        # nil
+    )
+    if @type == "reject_subscription" (
+        if @sub != nil (
+            map_remove[@stream{"subs"}, @ident]
+            cancel_confirm[@stream, @sub]
+            @rejected := err_new["rejected", "購読が拒否されました"]
+            @handler := map_get[@sub{"handlers"}, "on_reject", nil]
+            if @handler != nil ( @handler[@rejected] )
+            terminate_sub[@sub, @rejected]
+        )
+        # nil
+    )
+    // それ以外はイベント。`message` の中に event と、data か message がある
+    if @sub == nil || !map_has[@frame, "message"] || type_of[@frame{"message"}] != "map" ( # nil )
+    @payload := @frame{"message"}
+    @name := map_get[@payload, "event", ""]
+    @body := map_get[@payload, "data", nil]
+    if @body == nil ( @body = map_get[@payload, "message", nil] )
+    if @name == "" || @body == nil ( # nil )
+    @handler := map_get[@sub{"handlers"}, "on_event", nil]
+    if @handler != nil ( @handler[{"type": event_type_of[@name], "name": @name, "data": @body}] )
+    # nil
+)
+
+// ---- 購読 ----
+
+// 購読する。`handlers`: on_event[event]、on_confirm[]、on_reject[error]（拒否・確認の時間切れ）、
+// on_closed[error]（購読が終わったとき。利用者が閉じたときは nil）。戻り値は購読（`unsubscribe` に渡す）
+subscribe[@stream, @identifier, @handlers = {:}] (
+    assert[!@stream{"closed"}, "yaylib: 閉じたイベントストリームには購読できません"]
+    @sub := {"identifier": @identifier, "handlers": @handlers, "confirmed": false, "closed": false, "timer_id": nil}
+    @stream{"subs"}{@identifier} = @sub
+    if @stream{"ready"} ( send_subscribe[@stream, @sub] )
+    # @sub
+)
+
+send_subscribe[@stream, @sub] (
+    command[@stream, "subscribe", @sub{"identifier"}]
+    @sub{"confirmed"} = false
+    cancel_confirm[@stream, @sub]
+    @sub{"timer_id"} = @stream{"io"}{"after"}[@confirm_timeout, [] (
+        if !@sub{"confirmed"} && !@sub{"closed"} (
+            @sub{"timer_id"} = nil
+            @handler := map_get[@sub{"handlers"}, "on_reject", nil]
+            if @handler != nil ( @handler[err_new["timeout", "購読の確認が来ません（@{@confirm_timeout} 秒）"]] )
+        )
+    )]
+    # nil
+)
+
+cancel_confirm[@stream, @sub] (
+    if @sub{"timer_id"} != nil (
+        @stream{"io"}{"cancel"}[@sub{"timer_id"}]
+        @sub{"timer_id"} = nil
+    )
+    # nil
+)
+
+terminate_sub[@sub, @error] (
+    if @sub{"closed"} ( # nil )
+    @sub{"closed"} = true
+    @handler := map_get[@sub{"handlers"}, "on_closed", nil]
+    if @handler != nil ( @handler[@error] )
+    # nil
+)
+
+// 購読をやめる
+unsubscribe[@stream, @sub] (
+    if @sub{"closed"} ( # nil )
+    cancel_confirm[@stream, @sub]
+    if map_has[@stream{"subs"}, @sub{"identifier"}] ( map_remove[@stream{"subs"}, @sub{"identifier"}] )
+    if @stream{"ready"} ( command[@stream, "unsubscribe", @sub{"identifier"}] )
+    terminate_sub[@sub, nil]
+    # nil
+)

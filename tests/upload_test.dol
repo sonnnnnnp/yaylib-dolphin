@@ -1,0 +1,178 @@
+// アップロードのテスト。署名付き URL を返す偽のサーバーに対して、送ったものを確かめる
+@upload := import["../src/upload.dol"]
+@client := import["../src/client.dol"]
+@img := import["std:image"]
+@enc := import["std:encoding"]
+@json := import["std:json"]
+
+// 4 × 2 の PNG
+@png := @enc.base64_decode["iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAIElEQVR4nGNgYGj4HwDEC4D4AxAzMFQABYB4ARB/AGIAB3URmbLcb2EAAAAASUVORK5CYII="]
+
+// 偽のサーバー: 署名付き URL の要求には、名前ごとに `s3/` を付けた名前と URL を返し、PUT は記録して 200 を返す
+fake_server[] (
+    @log := {}
+    @send := [@req] (
+        arr_push[@log, @req]
+        if str_contains[@req{"url"}, "/v1/buckets/presigned_urls"] (
+            @names := {}
+            for @part in str_split[str_split[@req{"url"}, "?"]{1}, "&"] (
+                arr_push[@names, str_replace[str_split[@part, "="]{1}, "%2F", "/"]]
+            )
+            @list := {}
+            @i := 0
+            for @n in @names (
+                arr_push[@list, {"filename": "s3/@{@n}", "url": "https://bucket.example/put/@{@i}"}]
+                @i = @i + 1
+            )
+            # {"status": 200, "ok": true, "headers": {:}, "body": @json.stringify[{"presigned_urls": @list}]}
+        )
+        if str_contains[@req{"url"}, "/v1/users/presigned_url"] (
+            # {"status": 200, "ok": true, "headers": {:}, "body": "{\"presigned_url\": \"https://bucket.example/video\"}"}
+        )
+        # {"status": 200, "ok": true, "headers": {:}, "body": ""}
+    )
+    # {"log": @log, "send": @send}
+)
+
+make_client[@server] (
+    @c := @client.new_client[{"send": @server{"send"}, "sleep": [@s] ( # nil ), "device_uuid": "d", "client_ip": "1.1.1.1"}]
+    @c{"user_id"} = 77
+    # @c
+)
+
+puts[@server] (
+    # arr_filter[@server{"log"}, [@r] ( # @r{"method"} == "PUT" )]
+)
+
+test_filenames[] (
+    assert_eq[@upload.image_filename["user/1/posts/2026/10/18", "ABC", 1760000000000, 0, ".png", 4, 2], "user/1/posts/2026/10/18/ABC_1760000000000_0_size_4x2.png"]
+    assert_eq[@upload.thumbnail_filename["g/1/icon", "ABC", 1, 2, ".jpeg", 4, 2], "g/1/icon/thumb_ABC_1_2_size_4x2.jpeg"]
+    assert_eq[@upload.video_filename["XYZ", 5], "XYZ_5.mp4"]
+    assert_eq[@upload.normalize_ext["a.PNG"], ".png"]
+    assert_eq[@upload.normalize_ext["a.webp"], ".jpg"]
+    assert_eq[@upload.normalize_ext["noext"], ".jpg"]
+    assert_eq[@upload.content_type_for["x.png"], "image/png"]
+    assert_eq[@upload.content_type_for["x.jpeg"], "image/jpeg"]
+    assert_eq[@upload.content_type_for["x.mp4"], "video/mp4"]
+    assert_eq[@upload.random_prefix[16] != @upload.random_prefix[16], true]
+    assert_eq[str_len[@upload.random_prefix[16]], 16]
+    assert_eq[@upload.media_url["s3/user/1/avatar/x.png"], "https://cdn.yay.space/uploads/s3/user/1/avatar/x.png"]
+)
+
+test_post_images_upload_main_and_thumbnail[] (
+    @server := fake_server[]
+    @c := make_client[@server]
+    @names := @upload.upload_post_images[@c, {{"filename": "a.png", "data": @png}}]
+    // 戻り値は本体の名前（サーバーが付けた `s3/` つき）。サムネイルは含まない
+    assert_eq[arr_len[@names], 1]
+    assert[str_starts_with[@names{0}, "s3/user/77/posts/"]]
+    assert[str_ends_with[@names{0}, "_0_size_4x2.png"]]
+    // PUT は本体とサムネイルの 2 回。Authorization や Yay! のヘッダーは付けない
+    @puts := puts[@server]
+    assert_eq[arr_len[@puts], 2]
+    assert_eq[@puts{0}{"url"}, "https://bucket.example/put/0"]
+    assert_eq[@puts{0}{"headers"}, {"Content-Type": "image/png"}]
+    assert_eq[@puts{0}{"body"}, @png]
+    // サムネイルは JPEG（元の大きさの名前で、`.jpeg`）
+    assert_eq[@puts{1}{"headers"}, {"Content-Type": "image/jpeg"}]
+    assert_eq[@img.info[@puts{1}{"body"}]{"format"}, "jpeg"]
+    @presign := @server{"log"}{0}
+    assert[str_contains[@presign{"url"}, "file_names[]="]]
+    assert[str_contains[@presign{"url"}, "thumb_"]]
+    assert[str_contains[@presign{"url"}, "_size_4x2.jpeg"]]
+    // 署名付き URL を取る要求は、アプリのヘッダーつきで送る
+    assert_eq[@presign{"headers"}{"X-Device-UUID"}, "d"]
+)
+
+test_thumbnail_fits_inside_without_enlarging[] (
+    @t := @upload.make_thumbnail[@png, ".png", 2, 2, 4, 2]
+    @info := @img.info[@t{"data"}]
+    assert_eq[{@info{"width"}, @info{"height"}}, {2, 1}]
+    assert_eq[@t{"ext"}, ".jpeg"]
+    // 小さい画像は拡大しない
+    @small := @upload.make_thumbnail[@png, ".png", 450, 450, 4, 2]
+    assert_eq[@img.info[@small{"data"}]{"width"}, 4]
+)
+
+test_gif_thumbnail_stays_gif[] (
+    @gif := @img.convert[@png, "gif"]
+    @t := @upload.make_thumbnail[@gif, ".gif", 2, 2, 4, 2]
+    assert_eq[@t{"ext"}, ".gif"]
+    assert_eq[@img.info[@t{"data"}]{"format"}, "gif"]
+    // もう収まっているなら、元のバイト列のまま
+    @same := @upload.make_thumbnail[@gif, ".gif", 450, 450, 4, 2]
+    assert_eq[@same{"data"}, @gif]
+)
+
+test_report_is_capped_at_four[] (
+    @c := make_client[fake_server[]]
+    @file := {"filename": "a.png", "data": @png}
+    // 5 枚は、呼んだ時点の間違い（実行時エラーになる）なので、4 枚までの形だけ確かめる
+    @category := @upload.category_for[@c, "report", {}, 1760000000]
+    assert_eq[@category{"max"}, 4]
+    assert_eq[@category{"path"}, "report/2025/10/9"]
+)
+
+test_video_call_snapshot_has_no_thumbnail[] (
+    @server := fake_server[]
+    @c := make_client[@server]
+    @name := @upload.upload_video_call_snapshot_image[@c, {"filename": "a.png", "data": @png}]
+    assert[str_starts_with[@name, "s3/video_call_snapshot/"]]
+    assert_eq[arr_len[puts[@server]], 1]
+)
+
+test_categories[] (
+    @c := @client.new_client[{"utc_offset_minutes": 0}]
+    @ts := 1760000000
+    assert_eq[@upload.category_for[@c, "avatar", {5}, @ts], {"path": "user/5/avatar", "thumb": {200, 200}, "max": 9}]
+    assert_eq[@upload.category_for[@c, "cover", {5}, @ts]{"thumb"}, {300, 150}]
+    assert_eq[@upload.category_for[@c, "chat_message", {10, 5}, @ts]{"path"}, "chatroom/10/user/5/messages/2025/10/9"]
+    assert_eq[@upload.category_for[@c, "group_cover", {3}, @ts]{"path"}, "group/3/cover"]
+    assert_eq[@upload.category_for[@c, "thread_icon", {3}, @ts]{"path"}, "group/3/threads/2025/10/9"]
+    assert_eq[@upload.category_for[@c, "video_call_snapshot", {}, @ts]{"thumb"}, nil]
+)
+
+test_user_bound_upload_requires_login[] (
+    @c := @client.new_client[{:}]
+    @e := @upload.upload_avatar_image[@c, {"filename": "a.png", "data": @png}]
+    assert_eq[err_kind[@e], "not_logged_in"]
+)
+
+test_unreadable_image_is_an_error_value[] (
+    @server := fake_server[]
+    @c := make_client[@server]
+    @e := @upload.upload_post_images[@c, {{"filename": "a.png", "data": str_to_bytes["not an image"]}}]
+    assert_eq[err_kind[@e], "upload"]
+    // 何も送らない
+    assert_eq[arr_len[@server{"log"}], 0]
+)
+
+test_put_failure_stops_and_reports[] (
+    @log := {}
+    @send := [@req] (
+        arr_push[@log, @req]
+        if str_contains[@req{"url"}, "/v1/buckets/presigned_urls"] (
+            # {"status": 200, "ok": true, "headers": {:}, "body": "{\"presigned_urls\": [{\"filename\": \"s3/a\", \"url\": \"https://x/1\"}, {\"filename\": \"s3/b\", \"url\": \"https://x/2\"}]}"}
+        )
+        # {"status": 403, "ok": false, "headers": {:}, "body": "AccessDenied"}
+    )
+    @c := @client.new_client[{"send": @send, "sleep": [@s] ( # nil ), "client_ip": "1.1.1.1"}]
+    @c{"user_id"} = 1
+    @e := @upload.upload_post_images[@c, {{"filename": "a.png", "data": @png}}]
+    assert_eq[err_kind[@e], "upload"]
+    assert[str_contains[err_message[@e], "PUT 403: AccessDenied"]]
+    // 署名付き URL の要求と、最初の PUT の 2 回だけ
+    assert_eq[arr_len[@log], 2]
+)
+
+test_video_upload[] (
+    @server := fake_server[]
+    @c := make_client[@server]
+    @name := @upload.upload_video[@c, str_to_bytes["mp4-bytes"]]
+    assert[str_ends_with[@name, ".mp4"]]
+    @puts := puts[@server]
+    assert_eq[@puts{0}{"url"}, "https://bucket.example/video"]
+    assert_eq[@puts{0}{"headers"}, {"Content-Type": "video/mp4"}]
+    assert_eq[@puts{0}{"body"}, str_to_bytes["mp4-bytes"]]
+    assert[str_contains[@server{"log"}{0}{"url"}, "video_file_name=@{@name}"]]
+)

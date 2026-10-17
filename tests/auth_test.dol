@@ -1,0 +1,184 @@
+// ログインとセッションのテスト
+@auth := import["../src/auth.dol"]
+@client := import["../src/client.dol"]
+@session := import["../src/session.dol"]
+
+fake[@script] (
+    @sent := {}
+    @state := {"i": 0}
+    # {"sent": @sent, "send": [@req] (
+        arr_push[@sent, @req]
+        @i := @state{"i"}
+        @state{"i"} = @i + 1
+        if @i < arr_len[@script] ( # @script{@i} )
+        # {"status": 200, "ok": true, "headers": {:}, "body": "{}"}
+    )}
+)
+
+reply[@status, @body] (
+    # {"status": @status, "ok": @status >= 200 && @status < 300, "headers": {:}, "body": @body}
+)
+
+login_ok[] (
+    # reply[200, "{\"user_id\": 42, \"access_token\": \"acc\", \"refresh_token\": \"ref\"}"]
+)
+
+make_client[@f, @store = nil] (
+    # @client.new_client[{"send": @f{"send"}, "sleep": [@s] ( # nil ), "device_uuid": "dev-1", "client_ip": "1.2.3.4", "session_store": @store}]
+)
+
+test_web_login_is_primary[] (
+    @f := fake[{login_ok[]}]
+    @c := make_client[@f]
+    @r := @auth.login_with_email[@c, {"email": "me\@example.com", "password": "pw"}]
+    assert_eq[@r{"user_id"}, 42]
+    @sent := @f{"sent"}
+    assert_eq[arr_len[@sent], 1]
+    assert_eq[@sent{0}{"url"}, "https://api.yay.space/v2/users/login_with_email"]
+    // ブラウザ版のヘッダーだけ（アプリのヘッダーや Authorization は付けない）
+    @h := @sent{0}{"headers"}
+    assert_eq[@h{"Agent"}, "YayWeb 4.26.1"]
+    assert[!map_has[@h, "X-App-Version"]]
+    assert[!map_has[@h, "Authorization"]]
+    // 本文の api_key は Web 用のキー
+    @body := bytes_to_str[@sent{0}{"body"}]
+    assert[str_contains[@body, "\"api_key\":\"e9f1ae4c4470f29a92c0168dc42b13637cc332692103f23e626bc2b016f66603\""]]
+    assert[str_contains[@body, "\"uuid\":\"dev-1\""]]
+    // トークンと、セッションを作ったキーが設定される
+    assert_eq[@c{"access_token"}, "acc"]
+    assert_eq[@c{"refresh_token"}, "ref"]
+    assert_eq[@c{"user_id"}, 42]
+    assert_eq[@c{"oauth_key"}, "e9f1ae4c4470f29a92c0168dc42b13637cc332692103f23e626bc2b016f66603"]
+)
+
+test_fallback_to_app_login_only_on_error_code_401[] (
+    // error_code が 401（認証できない）のときだけ、アプリ版に切り替える
+    @f := fake[{reply[401, "{\"error_code\": 401}"], login_ok[]}]
+    @c := make_client[@f]
+    @r := @auth.login_with_email[@c, {"email": "a\@b", "password": "pw"}]
+    assert_eq[@r{"user_id"}, 42]
+    assert_eq[@f{"sent"}{1}{"url"}, "https://api.yay.space/v3/users/login_with_email"]
+    assert_eq[@f{"sent"}{1}{"headers"}{"X-App-Version"}, "4.26"]
+    // アプリ版のキーで作ったセッション
+    assert_eq[@c{"oauth_key"}, @c{"api_key"}]
+
+    // 2 要素認証が要るときは、そのまま返す
+    @f2 := fake[{reply[401, "{\"error_code\": -31, \"message\": \"2FA\"}"]}]
+    @c2 := make_client[@f2]
+    @e := @auth.login_with_email[@c2, {"email": "a\@b", "password": "pw"}]
+    assert_eq[err_data[@e]{"error_code"}, -31]
+    assert_eq[arr_len[@f2{"sent"}], 1]
+)
+
+test_both_fail_returns_web_error[] (
+    @f := fake[{reply[401, "{\"error_code\": 401, \"message\": \"web\"}"], reply[401, "{\"error_code\": 401, \"message\": \"app\"}"]}]
+    @c := make_client[@f]
+    @e := @auth.login_with_email[@c, {"email": "a\@b", "password": "pw"}]
+    assert_eq[err_message[@e], "web"]
+    assert_eq[arr_len[@f{"sent"}], 2]
+    assert_eq[@c{"access_token"}, ""]
+)
+
+test_pinned_api_key_uses_app_login_only[] (
+    @f := fake[{login_ok[]}]
+    @c := make_client[@f]
+    @auth.login_with_email[@c, {"email": "a\@b", "password": "pw", "api_key": "my-key"}]
+    assert_eq[arr_len[@f{"sent"}], 1]
+    assert_eq[@f{"sent"}{0}{"url"}, "https://api.yay.space/v3/users/login_with_email"]
+    assert_eq[@c{"oauth_key"}, "my-key"]
+)
+
+test_empty_web_key_disables_web_login[] (
+    @f := fake[{login_ok[]}]
+    @c := @client.new_client[{"send": @f{"send"}, "web_api_key": "", "device_uuid": "d", "client_ip": "1.1.1.1"}]
+    @auth.login_with_email[@c, {"email": "a\@b", "password": "pw"}]
+    assert_eq[@f{"sent"}{0}{"url"}, "https://api.yay.space/v3/users/login_with_email"]
+)
+
+test_two_fa_code_is_sent[] (
+    @f := fake[{login_ok[]}]
+    @c := make_client[@f]
+    @auth.login_with_email[@c, {"email": "a\@b", "password": "pw", "two_fa_code": "123456"}]
+    assert[str_contains[bytes_to_str[@f{"sent"}{0}{"body"}], "\"two_fa_code\":\"123456\""]]
+)
+
+test_session_is_saved_and_restored[] (
+    @store := @session.memory_session_store[]
+    @f := fake[{login_ok[]}]
+    @c := make_client[@f, @store]
+    @auth.login_with_email[@c, {"email": "me\@example.com", "password": "pw"}]
+    @saved := @store{"load"}["me\@example.com"]
+    assert_eq[@saved{"access_token"}, "acc"]
+    assert_eq[@saved{"user_id"}, 42]
+    assert_eq[@saved{"device_uuid"}, "dev-1"]
+
+    // 別のクライアントが、通信せずにキャッシュから復元する（端末の UUID も戻る）
+    @f2 := fake[{}]
+    @c2 := make_client[@f2, @store]
+    @c2{"device_uuid"} = "other"
+    @r := @auth.login_with_email[@c2, {"email": "me\@example.com", "password": "pw"}]
+    assert_eq[arr_len[@f2{"sent"}], 0]
+    assert_eq[@r, {"user_id": 42, "access_token": "acc", "refresh_token": "ref"}]
+    assert_eq[@c2{"device_uuid"}, "dev-1"]
+    assert_eq[@c2{"access_token"}, "acc"]
+
+    // no_cache なら新しくログインする
+    @f3 := fake[{login_ok[]}]
+    @c3 := make_client[@f3, @store]
+    @auth.login_with_email[@c3, {"email": "me\@example.com", "password": "pw", "no_cache": true}]
+    assert_eq[arr_len[@f3{"sent"}], 1]
+)
+
+test_corrupt_store_does_not_fall_through_to_login[] (
+    @store := {"load": [@email] ( # err_new["io", "壊れています"] ), "save": [@s] ( # nil ), "delete": [@e] ( # nil )}
+    @f := fake[{login_ok[]}]
+    @c := make_client[@f, @store]
+    @e := @auth.login_with_email[@c, {"email": "a\@b", "password": "pw"}]
+    assert_eq[err_kind[@e], "session_load"]
+    assert_eq[arr_len[@f{"sent"}], 0]
+)
+
+test_save_failure_keeps_tokens_active[] (
+    @store := {"load": [@email] ( # nil ), "save": [@s] ( # err_new["io", "書けません"] ), "delete": [@e] ( # nil )}
+    @f := fake[{login_ok[]}]
+    @c := make_client[@f, @store]
+    @e := @auth.login_with_email[@c, {"email": "a\@b", "password": "pw"}]
+    assert_eq[err_kind[@e], "session_save_failed"]
+    assert_eq[err_data[@e]{"response"}{"access_token"}, "acc"]
+    assert_eq[@c{"access_token"}, "acc"]
+)
+
+test_refresh_persists_new_tokens[] (
+    @store := @session.memory_session_store[]
+    @f := fake[{login_ok[]}]
+    @c := make_client[@f, @store]
+    @auth.login_with_email[@c, {"email": "a\@b", "password": "pw"}]
+    @transport := import["../src/transport.dol"]
+    @f2 := fake[{reply[200, "{\"access_token\": \"acc-2\", \"refresh_token\": \"ref-2\", \"id\": 42}"]}]
+    @c{"send"} = @f2{"send"}
+    @transport.refresh_tokens[@c, "acc"]
+    assert_eq[@store{"load"}["a\@b"]{"access_token"}, "acc-2"]
+    assert_eq[@store{"load"}["a\@b"]{"refresh_token"}, "ref-2"]
+)
+
+test_file_session_store_roundtrip[] (
+    @dir := "tests-tmp-sessions"
+    @file := "@{@dir}/sessions.json"
+    if file_exists[@file] ( file_remove_all[@dir] )
+    @store := @session.file_session_store[@file]
+    assert_eq[@store{"load"}["x\@y"], nil]
+    assert_eq[@store{"save"}[{"email": "x\@y", "user_id": 1, "access_token": "a", "refresh_token": "r", "device_uuid": "d"}], nil]
+    assert_eq[@store{"load"}["x\@y"]{"access_token"}, "a"]
+    assert[str_contains[@store{"load"}["x\@y"]{"updated_at"}, "T"]]
+    // 同じメールアドレスは上書き、別のメールアドレスは並ぶ
+    @store{"save"}[{"email": "x\@y", "user_id": 1, "access_token": "a2", "refresh_token": "r", "device_uuid": "d"}]
+    @store{"save"}[{"email": "z\@y", "user_id": 2, "access_token": "b", "refresh_token": "r", "device_uuid": "d"}]
+    assert_eq[@store{"load"}["x\@y"]{"access_token"}, "a2"]
+    assert_eq[@store{"load"}["z\@y"]{"access_token"}, "b"]
+    // 消すのは何度でも
+    assert_eq[@store{"delete"}["x\@y"], nil]
+    assert_eq[@store{"delete"}["x\@y"], nil]
+    assert_eq[@store{"load"}["x\@y"], nil]
+    assert[!file_exists["@{@file}.tmp"]]
+    file_remove_all[@dir]
+)

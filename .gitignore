@@ -1,0 +1,6 @@
+# tools/gen.py --fetch が取得する元のソース（ekkx/yaylib）
+/tools/.reference/
+# 実行中にできる一時ファイル
+/tests-tmp-sessions/
+/tests/tests-tmp-sessions/
+*.tmp

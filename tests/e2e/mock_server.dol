@@ -1,0 +1,35 @@
+// 偽の Yay! サーバー（統合テスト用）。使い方: dolphin mock_server.dol <ポート>
+@http := import["std:http"]
+@os := import["std:os"]
+
+@port := to_num[@os.args[]{0}]
+@posts := {}
+
+@http.serve[@port, [@req] (
+    @path := @req{"path"}
+    @h := @req{"headers"}
+    if @path == "/v2/users/login_with_email" (
+        // ブラウザ版: アプリのヘッダーは付かない
+        if map_has[@h, "x-app-version"] ( # {"status": 400, "json": {"error_code": -1, "message": "app headers on web login"}} )
+        # {"json": {"user_id": 7, "access_token": "A1", "refresh_token": "R1"}}
+    )
+    if @path == "/v2/users/timestamp" ( # {"json": {"ip_address": "2.2.2.2", "time": 1}} )
+    if @path == "/api/v1/oauth/token" (
+        if map_get[@h, "authorization", ""] != "Basic ZTlmMWFlNGM0NDcwZjI5YTkyYzAxNjhkYzQyYjEzNjM3Y2MzMzI2OTIxMDNmMjNlNjI2YmMyYjAxNmY2NjYwMw==" (
+            # {"status": 401, "json": {"error_code": -18}}
+        )
+        # {"json": {"access_token": "A2", "refresh_token": "R2", "id": 7}}
+    )
+    // 以降は認証が要る。A1 は期限切れ扱いにして、更新を試す
+    @auth := map_get[@h, "authorization", ""]
+    if @auth == "Bearer A1" ( # {"status": 401, "json": {"error_code": -3, "message": "expired"}} )
+    if @auth != "Bearer A2" ( # {"status": 401, "json": {"error_code": -18}} )
+    if @path == "/v2/posts/timeline" (
+        # {"json": {"posts": @posts, "ip": map_get[@h, "x-client-ip", ""], "ua": map_get[@h, "user-agent", ""]}}
+    )
+    if @path == "/v3/posts/new" (
+        arr_push[@posts, {"id": arr_len[@posts] + 1, "len": str_len[@req{"body"}], "ct": str_sub[@h{"content-type"}, 0, 19], "jwt": map_has[@h, "x-jwt"]}]
+        # {"json": {"id": arr_len[@posts]}}
+    )
+    # {"status": 404, "json": {"error_code": -1, "message": "nope: @{@path}"}}
+)]

@@ -1,0 +1,75 @@
+// エラー（PORTING.md 10 章）
+//
+// サーバーが返したエラーは、種類 "api" のエラー値にする。詳細（`err_data`）は
+//   {"status": HTTP のステータス, "body": 本文, "headers": ヘッダー,
+//    "error_code": サーバーのエラーコード（なければ 0）, "message": …,
+//    "ban_until": …, "retry_in": …, "remaining_quota": …}
+// 通信の失敗などは std:http のエラー値のまま返す。
+
+@json := import["std:json"]
+@codes := import["./error_codes.dol"]
+
+// HTTP の応答（{"status", "headers", "body"}）から "api" のエラー値を作る
+api_error[@status, @headers, @body] (
+    @data := {
+        "status": @status,
+        "body": @body,
+        "headers": @headers,
+        "error_code": 0,
+        "message": "",
+        "ban_until": nil,
+        "retry_in": nil,
+        "remaining_quota": nil
+    }
+    @parsed := parse_error_body[@body]
+    if @parsed != nil (
+        for @key in {"error_code", "message", "ban_until", "retry_in", "remaining_quota"} (
+            if map_has[@parsed, @key] ( @data{@key} = @parsed{@key} )
+        )
+    )
+    @text := @data{"message"}
+    if type_of[@text] != "string" || @text == "" ( @text = "HTTP @{@status}" )
+    # err_new["api", @text, @data]
+)
+
+// 本文がエラーの JSON ならマップ、そうでなければ nil
+parse_error_body[@body] (
+    if type_of[@body] != "string" || @body == "" ( # nil )
+    @parsed := @json.parse[@body]
+    if is_error[@parsed] || type_of[@parsed] != "map" ( # nil )
+    # @parsed
+)
+
+// `error_response_of`: 解析できたサーバーのエラー（{"error_code", "message", "ban_until", "retry_in", "remaining_quota"}）。
+// "api" のエラーでなければ nil。本文が JSON でなかったときも nil
+error_response_of[@e] (
+    if !is_error[@e] || err_kind[@e] != "api" ( # nil )
+    @data := err_data[@e]
+    if parse_error_body[@data{"body"}] == nil ( # nil )
+    # {
+        "error_code": @data{"error_code"},
+        "message": @data{"message"},
+        "ban_until": @data{"ban_until"},
+        "retry_in": @data{"retry_in"},
+        "remaining_quota": @data{"remaining_quota"}
+    }
+)
+
+// サーバーのエラーコード。解析できなければ 0（unknown）
+code_of[@e] (
+    @r := error_response_of[@e]
+    if @r == nil ( # 0 )
+    if type_of[@r{"error_code"}] != "number" ( # 0 )
+    # @r{"error_code"}
+)
+
+// 名前つきのエラーコードの表（`error_codes()["required_2fa"]` は -31）
+error_codes[] (
+    # @codes.error_codes[]
+)
+
+// HTTP のステータス（"api" のエラーでなければ 0）
+status_of[@e] (
+    if !is_error[@e] || err_kind[@e] != "api" ( # 0 )
+    # err_data[@e]{"status"}
+)

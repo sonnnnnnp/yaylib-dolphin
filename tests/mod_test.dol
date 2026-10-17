@@ -1,0 +1,51 @@
+// 公開 API（mod.dol）のテスト
+@yay := import["../mod.dol"]
+
+fake_send[@log] (
+    # [@req] (
+        arr_push[@log, @req]
+        # {"status": 200, "ok": true, "headers": {:}, "body": "{\"ok\": true}"}
+    )
+)
+
+test_flat_facade_calls_the_operation[] (
+    @log := {}
+    @c := @yay.new_client[{"send": fake_send[@log], "client_ip": "1.1.1.1"}]
+    @r := @yay.get_timeline[@c, {"noreply_mode": "", "number": 20}]
+    assert_eq[@r, {"ok": true}]
+    assert_eq[@log{0}{"url"}, "https://api.yay.space/v2/posts/timeline?number=20"]
+)
+
+test_hand_written_names_take_precedence[] (
+    // login_with_email は手書き（キャッシュとブラウザ版のログイン）。生成された関数ではない
+    @log := {}
+    @c := @yay.new_client[{"send": fake_send[@log], "client_ip": "1.1.1.1"}]
+    @yay.login_with_email[@c, {"email": "a\@b", "password": "p"}]
+    assert_eq[@log{0}{"url"}, "https://api.yay.space/v2/users/login_with_email"]
+)
+
+test_unknown_parameter_is_a_programming_error[] (
+    // 表にないキーは実行時エラー（テストでは確かめにくいので、組み立てだけ見る）
+    @call := import["../src/call.dol"]
+    @c := @yay.new_client[]
+    @req := @call.build_request[@c, "get_timeline", {"noreply_mode": ""}]
+    assert_eq[@req{"path"}, "/v2/posts/timeline"]
+)
+
+test_error_codes_and_helpers[] (
+    assert_eq[@yay.error_codes[]{"required_2fa"}, -31]
+    assert_eq[@yay.error_codes[]{"unauthorized"}, 401]
+    @e := err_new["api", "x", {"status": 429, "body": "{\"error_code\": -343, \"retry_in\": 5}", "error_code": -343, "message": "x", "retry_in": 5, "ban_until": nil, "remaining_quota": nil}]
+    assert_eq[@yay.code_of[@e], @yay.error_codes[]{"quota_limit_exceeded"}]
+    assert_eq[@yay.status_of[@e], 429]
+    assert_eq[@yay.error_response_of[@e]{"retry_in"}, 5]
+    assert_eq[@yay.code_of[err_new["network", "x"]], 0]
+    assert_eq[@yay.error_response_of[err_new["network", "x"]], nil]
+)
+
+test_host_routed_operation[] (
+    @log := {}
+    @c := @yay.new_client[{"send": fake_send[@log], "client_ip": "1.1.1.1"}]
+    @yay.get_user_activities[@c, {:}]
+    assert_eq[@log{0}{"url"}, "https://cas.yay.space/api/v2/user_activities"]
+)

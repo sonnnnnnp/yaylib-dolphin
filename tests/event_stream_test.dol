@@ -1,0 +1,254 @@
+// イベントストリームのテスト。通信（WebSocket とタイマー）を偽物にして、フレームを手で流し込む
+@es := import["../src/event_stream.dol"]
+@client := import["../src/client.dol"]
+@json := import["std:json"]
+
+// 偽の通信。connect はハンドラーを覚え、after は予約を覚え、時刻は clock で動かす
+fake_io[] (
+    @st := {"connects": {}, "sent": {}, "closed": 0, "timers": {}, "cancelled": {}, "clock": 1000, "next_id": 1}
+    @io := {
+        "connect": [@url, @options, @handlers] (
+            arr_push[@st{"connects"}, {"url": @url, "handlers": @handlers}]
+            # 0
+        ),
+        "send": [@conn, @text] ( arr_push[@st{"sent"}, @text] ),
+        "close": [@conn] ( @st{"closed"} = @st{"closed"} + 1 ),
+        "after": [@delay, @fn] (
+            @id := @st{"next_id"}
+            @st{"next_id"} = @id + 1
+            arr_push[@st{"timers"}, {"id": @id, "delay": @delay, "fn": @fn}]
+            # @id
+        ),
+        "cancel": [@id] ( arr_push[@st{"cancelled"}, @id] ),
+        "now": [] ( # @st{"clock"} )
+    }
+    # {"io": @io, "st": @st}
+)
+
+// WebSocket のトークンを返す偽の HTTP
+make_client[] (
+    # @client.new_client[{
+        "send": [@req] ( # {"status": 200, "ok": true, "headers": {:}, "headers_": {:}, "body": "{\"token\": \"jwt-1\"}"} ),
+        "sleep": [@s] ( # nil ),
+        "device_uuid": "d",
+        "client_ip": "1.1.1.1"
+    }]
+)
+
+open_stream[@f, @extra = {:}] (
+    @events := {}
+    @options := map_merge[{
+        "io": @f{"io"},
+        "on_open": [] ( arr_push[@events, "open"] ),
+        "on_error": [@e] ( arr_push[@events, "error:@{err_message[@e]}"] ),
+        "on_reconnect": [@attempt, @delay] ( arr_push[@events, "reconnect:@{@attempt}:@{@delay}"] )
+        }, @extra]
+    @s := @es.open_event_stream[make_client[], @options]
+    # {"stream": @s, "events": @events}
+)
+
+// 最後に開いた接続のハンドラーを呼ぶ
+last_handlers[@f] (
+    # @f{"st"}{"connects"}{arr_len[@f{"st"}{"connects"}] - 1}{"handlers"}
+)
+
+frame[@m] (
+    # @json.stringify[@m]
+)
+
+welcome[@f] (
+    @h := last_handlers[@f]
+    @h{"on_open"}[1]
+    @h{"on_message"}[1, frame[{"type": "welcome"}]]
+    # nil
+)
+
+test_connects_with_token_and_app_version[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    assert_eq[@f{"st"}{"connects"}{0}{"url"}, "wss://cable.yay.space?token=jwt-1&app_version=4.26"]
+)
+
+test_subscribe_waits_for_welcome_then_sends[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    @got := {}
+    @sub := @es.subscribe[@o{"stream"}, @es.chat_room_channel[], {"on_confirm": [] ( arr_push[@got, "confirm"] ), "on_event": [@ev] ( arr_push[@got, @ev] )}]
+    // welcome の前は送らない
+    assert_eq[arr_len[@f{"st"}{"sent"}], 0]
+    welcome[@f]
+    assert_eq[@o{"events"}, {"open"}]
+    assert_eq[@f{"st"}{"sent"}, {"{\"command\":\"subscribe\",\"identifier\":\"{\\\"channel\\\":\\\"ChatRoomChannel\\\"}\"}"}]
+    @h := last_handlers[@f]
+    // 確認
+    @h{"on_message"}[1, frame[{"type": "confirm_subscription", "identifier": @es.chat_room_channel[]}]]
+    // イベント（payload は data でも message でもよい）
+    @h{"on_message"}[1, frame[{"identifier": @es.chat_room_channel[], "message": {"event": "new_message", "data": {"id": 1}}}]]
+    @h{"on_message"}[1, frame[{"identifier": @es.chat_room_channel[], "message": {"event": "new_post", "message": {"group_id": 5}}}]]
+    @h{"on_message"}[1, frame[{"identifier": @es.chat_room_channel[], "message": {"event": "something_new", "data": {"x": 1}}}]]
+    assert_eq[@got{0}, "confirm"]
+    assert_eq[@got{1}, {"type": "NewMessageEvent", "name": "new_message", "data": {"id": 1}}]
+    assert_eq[@got{2}, {"type": "GroupUpdatedEvent", "name": "new_post", "data": {"group_id": 5}}]
+    assert_eq[@got{3}{"type"}, "RawEvent"]
+    assert_eq[@got{3}{"name"}, "something_new"]
+)
+
+test_identifiers_are_exact_strings[] (
+    assert_eq[@es.chat_room_channel[], "{\"channel\":\"ChatRoomChannel\"}"]
+    assert_eq[@es.messages_channel[123], "{\"channel\":\"MessagesChannel\",\"chat_room_id\":\"123\"}"]
+    assert_eq[@es.group_updates_channel[], "{\"channel\":\"GroupUpdatesChannel\"}"]
+    assert_eq[@es.group_posts_channel[7], "{\"channel\":\"GroupPostsChannel\",\"group_id\":\"7\"}"]
+)
+
+test_events_for_other_channels_and_ping_are_ignored[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    @got := {}
+    @es.subscribe[@o{"stream"}, @es.chat_room_channel[], {"on_event": [@ev] ( arr_push[@got, @ev] )}]
+    welcome[@f]
+    @h := last_handlers[@f]
+    @h{"on_message"}[1, frame[{"type": "ping", "message": 1700000000}]]
+    @h{"on_message"}[1, frame[{"identifier": @es.group_updates_channel[], "message": {"event": "new_post", "data": {"group_id": 5}}}]]
+    @h{"on_message"}[1, "not json"]
+    assert_eq[arr_len[@got], 0]
+)
+
+test_rejected_subscription_ends_it[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    @got := {}
+    @es.subscribe[@o{"stream"}, @es.chat_room_channel[], {
+        "on_reject": [@e] ( arr_push[@got, "reject:@{err_kind[@e]}"] ),
+        "on_closed": [@e] ( arr_push[@got, "closed:@{err_kind[@e]}"] )
+    }]
+    welcome[@f]
+    last_handlers[@f]{"on_message"}[1, frame[{"type": "reject_subscription", "identifier": @es.chat_room_channel[]}]]
+    assert_eq[@got, {"reject:rejected", "closed:rejected"}]
+)
+
+test_confirmation_timeout[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    @got := {}
+    @es.subscribe[@o{"stream"}, @es.chat_room_channel[], {"on_reject": [@e] ( arr_push[@got, err_kind[@e]] )}]
+    welcome[@f]
+    // 10 秒の予約が 1 つ
+    @timer := @f{"st"}{"timers"}{0}
+    assert_eq[@timer{"delay"}, 10]
+    @timer{"fn"}[]
+    assert_eq[@got, {"timeout"}]
+)
+
+test_reconnect_resubscribes[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    @es.subscribe[@o{"stream"}, @es.chat_room_channel[], {:}]
+    welcome[@f]
+    assert_eq[arr_len[@f{"st"}{"sent"}], 1]
+    // 切れた → 0.5 秒後につなぎ直す
+    last_handlers[@f]{"on_close"}[1, 1006, "切れた"]
+    assert_eq[@o{"events"}, {"open", "reconnect:1:0.5"}]
+    @timer := @f{"st"}{"timers"}{arr_len[@f{"st"}{"timers"}] - 1}
+    assert_eq[@timer{"delay"}, 0.5]
+    @timer{"fn"}[]
+    assert_eq[arr_len[@f{"st"}{"connects"}], 2]
+    welcome[@f]
+    // 新しい接続で、購読をやり直す
+    assert_eq[arr_len[@f{"st"}{"sent"}], 2]
+    assert_eq[@f{"st"}{"sent"}{0}, @f{"st"}{"sent"}{1}]
+)
+
+test_backoff_grows_and_resets_after_a_stable_connection[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    // つながらない（on_error）が続くと、0.5 → 1 → 2
+    for @i in range[0, 3] (
+        last_handlers[@f]{"on_error"}[err_new["network", "x"]]
+        @timer := @f{"st"}{"timers"}{arr_len[@f{"st"}{"timers"}] - 1}
+        @timer{"fn"}[]
+    )
+    assert_eq[@o{"events"}, {"reconnect:1:0.5", "reconnect:2:1", "reconnect:3:2"}]
+    // welcome から 30 秒以上続いて切れたら、数え直す
+    welcome[@f]
+    @f{"st"}{"clock"} = @f{"st"}{"clock"} + 40
+    last_handlers[@f]{"on_close"}[1, 1006, "x"]
+    assert_eq[@o{"events"}{arr_len[@o{"events"}] - 1}, "reconnect:1:0.5"]
+)
+
+test_gives_up_after_max_attempts[] (
+    @f := fake_io[]
+    @o := open_stream[@f, {"reconnect": {"max_attempts": 2}}]
+    @closed := {}
+    @es.subscribe[@o{"stream"}, @es.chat_room_channel[], {"on_closed": [@e] ( arr_push[@closed, err_kind[@e]] )}]
+    for @i in range[0, 3] (
+        last_handlers[@f]{"on_error"}[err_new["network", "x"]]
+        if @i < 2 (
+            @timer := @f{"st"}{"timers"}{arr_len[@f{"st"}{"timers"}] - 1}
+            @timer{"fn"}[]
+        )
+    )
+    assert_eq[@o{"events"}{arr_len[@o{"events"}] - 1}, "error:イベントストリームがつながりません: x"]
+    assert_eq[@closed, {"event_stream"}]
+    assert[@o{"stream"}{"closed"}]
+)
+
+test_reconnect_can_be_disabled[] (
+    @f := fake_io[]
+    @o := open_stream[@f, {"reconnect": {"disabled": true}}]
+    welcome[@f]
+    last_handlers[@f]{"on_close"}[1, 1006, "切れた"]
+    assert_eq[arr_len[@f{"st"}{"timers"}], 0]
+    assert_eq[@o{"events"}, {"open", "error:イベントストリームがつながりません: 接続が閉じました（1006 切れた）"}]
+)
+
+test_user_close_is_quiet[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    @got := {}
+    @es.subscribe[@o{"stream"}, @es.chat_room_channel[], {"on_closed": [@e] ( arr_push[@got, @e] )}]
+    welcome[@f]
+    @es.close_event_stream[@o{"stream"}]
+    assert_eq[@f{"st"}{"closed"}, 1]
+    assert_eq[@got, {nil}]
+    // そのあと接続が閉じた通知が来ても、つなぎ直さない
+    last_handlers[@f]{"on_close"}[1, 1000, ""]
+    assert_eq[arr_len[@f{"st"}{"connects"}], 1]
+    assert_eq[@o{"events"}, {"open"}]
+)
+
+test_server_disconnect_frame_closes_and_reconnects[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    welcome[@f]
+    last_handlers[@f]{"on_message"}[1, frame[{"type": "disconnect", "reason": "server_restart"}]]
+    assert_eq[@f{"st"}{"closed"}, 1]
+)
+
+test_unsubscribe[] (
+    @f := fake_io[]
+    @o := open_stream[@f]
+    @got := {}
+    @sub := @es.subscribe[@o{"stream"}, @es.chat_room_channel[], {"on_closed": [@e] ( arr_push[@got, @e] )}]
+    welcome[@f]
+    @es.unsubscribe[@o{"stream"}, @sub]
+    assert_eq[@f{"st"}{"sent"}{1}, "{\"command\":\"unsubscribe\",\"identifier\":\"{\\\"channel\\\":\\\"ChatRoomChannel\\\"}\"}"]
+    assert_eq[@got, {nil}]
+    // やめた購読へのイベントは届かない
+    last_handlers[@f]{"on_message"}[1, frame[{"identifier": @es.chat_room_channel[], "message": {"event": "new_message", "data": {"id": 1}}}]]
+    assert_eq[arr_len[@got], 1]
+)
+
+test_token_failure_is_retried[] (
+    @f := fake_io[]
+    @events := {}
+    @c := @client.new_client[{
+        "send": [@req] ( # {"status": 500, "ok": false, "headers": {:}, "body": "{}"} ),
+        "sleep": [@s] ( # nil ),
+        "retry": {"max_attempts": 1},
+        "client_ip": "1.1.1.1"
+    }]
+    @s := @es.open_event_stream[@c, {"io": @f{"io"}, "on_reconnect": [@a, @d] ( arr_push[@events, @a] )}]
+    // トークンをもらえないので、WebSocket は開かず、つなぎ直しを予約する
+    assert_eq[arr_len[@f{"st"}{"connects"}], 0]
+    assert_eq[@events, {1}]
+)

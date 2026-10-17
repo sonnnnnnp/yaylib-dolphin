@@ -1,0 +1,49 @@
+// 署名・JWT・UUID（PORTING.md 8 章）
+
+@enc := import["std:encoding"]
+@crypto := import["std:crypto"]
+@time := import["std:time"]
+
+// signed_info の末尾につける、サーバーと共有している文字列
+@signed_info_shared_key := "yayZ1"
+// signed_version の元になる文字列の頭
+@signed_version_platform := "yay_android"
+// X-Jwt の有効期間（秒）
+@x_jwt_ttl := 5
+
+// `signed_info`: MD5(api_key + device_uuid + timestamp + 共有文字列) の 16 進数。
+// 戻り値は {"timestamp": 整数, "value": 文字列}
+signed_info_at[@c, @timestamp] (
+    @payload := str_concat[@c{"api_key"}, @c{"device_uuid"}, @timestamp, @signed_info_shared_key]
+    # {"timestamp": @timestamp, "value": @enc.hex_encode[@crypto.hash["md5", @payload]]}
+)
+
+// 今の時刻（秒）での signed_info。サーバーの時刻とずれていても、同じ時刻を `timestamp` に使う
+signed_info[@c] (
+    # signed_info_at[@c, floor[@time.now[]]]
+)
+
+// `signed_version`: HMAC-SHA256(api_version_key, "yay_android/<api_version_name>") の base64（詰め物あり）
+signed_version[@c] (
+    @message := str_concat[@signed_version_platform, "/", @c{"api_version_name"}]
+    # @enc.base64_encode[@crypto.hmac["sha256", @c{"api_version_key"}, @message]]
+)
+
+// `X-Jwt`: HS256 の JWT（ヘッダーは {"alg":"HS256"} だけ、ペイロードは iat と exp）。
+// 有効期間が短いので、呼ぶたびに作る
+x_jwt_at[@c, @iat] (
+    @header := @enc.base64url_encode["{\"alg\":\"HS256\"}"]
+    @payload := @enc.base64url_encode[str_concat["{\"iat\":", @iat, ",\"exp\":", @iat + @x_jwt_ttl, "}"]]
+    @input := str_concat[@header, ".", @payload]
+    @signature := @enc.base64url_encode[@crypto.hmac["sha256", @c{"api_version_key"}, @input]]
+    # str_concat[@input, ".", @signature]
+)
+
+x_jwt[@c] (
+    # x_jwt_at[@c, floor[@time.now[]]]
+)
+
+// 端末の UUID（v4）
+new_uuid[] (
+    # @crypto.uuid[]
+)

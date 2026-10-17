@@ -1,0 +1,41 @@
+// 署名のテスト（期待値は ekkx/yaylib の PORTING.md 8 章）
+@signing := import["../src/signing.dol"]
+@enc := import["std:encoding"]
+@crypto := import["std:crypto"]
+
+@default_client := {
+    "api_key": "ccd59ee269c01511ba763467045c115779fcae3050238a252f1bd1a4b65cfec6",
+    "api_version_key": "34c8c1cdf29b46a492e8ec58e6db37ec",
+    "api_version_name": "4.26",
+    "device_uuid": "00000000-0000-0000-0000-000000000000"
+}
+
+test_signed_info_golden[] (
+    @s := @signing.signed_info_at[@default_client, 1700000000]
+    assert_eq[@s{"value"}, "253b7ca3e67590204034a73326d2be87"]
+    assert_eq[@s{"timestamp"}, 1700000000]
+)
+
+test_signed_version_is_standard_base64[] (
+    @v := @signing.signed_version[@default_client]
+    assert_eq[@v, "zyKEqdZqaEqJjSRItHvchU9HmgWHNLtn02sWXwzQ4iQ="]
+)
+
+test_x_jwt_shape_and_signature[] (
+    @jwt := @signing.x_jwt_at[@default_client, 1700000000]
+    @parts := str_split[@jwt, "."]
+    assert_eq[arr_len[@parts], 3]
+    // ヘッダーに typ はなく、ペイロードは iat、exp の順で空白なし
+    assert_eq[@enc.base64url_decode[@parts{0}] == str_to_bytes["{\"alg\":\"HS256\"}"], true]
+    assert_eq[@enc.base64url_decode[@parts{1}] == str_to_bytes["{\"iat\":1700000000,\"exp\":1700000005}"], true]
+    // 詰め物なし
+    assert[!str_contains[@jwt, "="]]
+    @expected := @enc.base64url_encode[@crypto.hmac["sha256", "34c8c1cdf29b46a492e8ec58e6db37ec", "@{@parts{0}}.@{@parts{1}}"]]
+    assert_eq[@parts{2}, @expected]
+)
+
+test_uuid_is_v4[] (
+    @u := @signing.new_uuid[]
+    assert_eq[str_len[@u], 36]
+    assert_eq[str_sub[@u, 14, 15], "4"]
+)
